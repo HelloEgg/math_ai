@@ -1,0 +1,24 @@
+import os
+
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+
+class Config:
+    """Application configuration."""
+    SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
+
+    # Database
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL', f'sqlite:///{os.path.join(BASE_DIR, "math_problems.db")}')
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+    # File uploads
+    UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+    IMAGE_FOLDER = os.path.join(UPLOAD_FOLDER, 'images')
+    AUDIO_FOLDER = os.path.join(UPLOAD_FOLDER, 'audio')
+
+    # Allowed extensions
+    ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+    ALLOWED_AUDIO_EXTENSIONS = {'mp3', 'wav', 'ogg', 'm4a', 'webm'}
+
+    # Max file sizes (in bytes)
+    MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
+    MAX_AUDIO_SIZE = 50 * 1024 * 1024  # 50 MB
