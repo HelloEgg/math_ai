@@ -28,6 +28,75 @@ python app.py
 
 The server will start on `http://localhost:5000`.
 
+## Running with HTTPS
+
+### Option 1: Self-signed certificates (for development/testing)
+
+```bash
+# Generate self-signed certificates
+./generate_certs.sh
+
+# Start server with HTTPS
+python app.py --https
+
+# Or with custom port (443 requires sudo)
+sudo python app.py --https --port 443
+```
+
+> **Note:** Self-signed certificates will show browser security warnings. Click "Advanced" → "Proceed" to continue.
+
+### Option 2: Let's Encrypt (for production)
+
+```bash
+# Install certbot
+sudo apt install certbot  # Ubuntu/Debian
+# or
+sudo yum install certbot  # CentOS/RHEL
+
+# Generate certificate (stop any server on port 80 first)
+sudo certbot certonly --standalone -d yourdomain.com
+
+# Start server with Let's Encrypt certificates
+sudo python app.py --https \
+  --cert /etc/letsencrypt/live/yourdomain.com/fullchain.pem \
+  --key /etc/letsencrypt/live/yourdomain.com/privkey.pem \
+  --port 443
+```
+
+### Option 3: Reverse proxy with nginx (recommended for production)
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name yourdomain.com;
+
+    ssl_certificate /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 50M;
+    }
+}
+```
+
+### Command-line options
+
+```bash
+python app.py --help
+
+Options:
+  --host HOST     Host to bind to (default: 0.0.0.0)
+  --port PORT     Port to bind to (default: 5000)
+  --https         Enable HTTPS
+  --cert FILE     SSL certificate file (default: certs/cert.pem)
+  --key FILE      SSL private key file (default: certs/key.pem)
+  --debug         Enable debug mode
+```
+
 ## Quick Start Examples
 
 ### 1. Create a new math problem
