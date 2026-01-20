@@ -309,4 +309,35 @@ def delete_problem(uuid):
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    import argparse
+    import ssl
+
+    parser = argparse.ArgumentParser(description='Math Problems Server')
+    parser.add_argument('--host', default='0.0.0.0', help='Host to bind to (default: 0.0.0.0)')
+    parser.add_argument('--port', type=int, default=5000, help='Port to bind to (default: 5000)')
+    parser.add_argument('--https', action='store_true', help='Enable HTTPS')
+    parser.add_argument('--cert', default='certs/cert.pem', help='SSL certificate file (default: certs/cert.pem)')
+    parser.add_argument('--key', default='certs/key.pem', help='SSL private key file (default: certs/key.pem)')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+
+    args = parser.parse_args()
+
+    if args.https:
+        # Check if certificate files exist
+        if not os.path.exists(args.cert) or not os.path.exists(args.key):
+            print(f"Error: SSL certificate files not found!")
+            print(f"  Certificate: {args.cert}")
+            print(f"  Private key: {args.key}")
+            print("\nGenerate self-signed certificates with:")
+            print("  ./generate_certs.sh")
+            print("\nOr for production, use Let's Encrypt:")
+            print("  sudo certbot certonly --standalone -d yourdomain.com")
+            exit(1)
+
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(args.cert, args.key)
+        print(f"Starting HTTPS server on https://{args.host}:{args.port}")
+        app.run(host=args.host, port=args.port, debug=args.debug, ssl_context=ssl_context)
+    else:
+        print(f"Starting HTTP server on http://{args.host}:{args.port}")
+        app.run(host=args.host, port=args.port, debug=args.debug)
