@@ -1,6 +1,7 @@
 import os
 import hashlib
 from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
 from config import Config
@@ -14,6 +15,15 @@ def create_app(config_class=Config):
 
     # Initialize extensions
     db.init_app(app)
+
+    # Enable CORS for all routes
+    CORS(app, resources={
+        r"/*": {
+            "origins": "*",  # Allow all origins (change to specific domains in production)
+            "methods": ["GET", "POST", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"]
+        }
+    })
 
     # Create upload directories
     os.makedirs(app.config['IMAGE_FOLDER'], exist_ok=True)
