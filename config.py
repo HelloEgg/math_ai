@@ -10,10 +10,18 @@ class Config:
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL', f'sqlite:///{os.path.join(BASE_DIR, "math_problems.db")}')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
-    # File uploads
+    # File uploads - General
     UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
     IMAGE_FOLDER = os.path.join(UPLOAD_FOLDER, 'images')
     AUDIO_FOLDER = os.path.join(UPLOAD_FOLDER, 'audio')
+
+    # File uploads - Summary
+    IMAGE_FOLDER_SUMMARY = os.path.join(UPLOAD_FOLDER, 'images_summary')
+    AUDIO_FOLDER_SUMMARY = os.path.join(UPLOAD_FOLDER, 'audio_summary')
+
+    # File uploads - Deep
+    IMAGE_FOLDER_DEEP = os.path.join(UPLOAD_FOLDER, 'images_deep')
+    AUDIO_FOLDER_DEEP = os.path.join(UPLOAD_FOLDER, 'audio_deep')
 
     # Allowed extensions
     ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}

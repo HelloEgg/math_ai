@@ -5,7 +5,7 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
 from config import Config
-from models import db, MathProblem
+from models import db, MathProblem, MathProblemSummary, MathProblemDeep
 
 
 def create_app(config_class=Config):
@@ -25,9 +25,15 @@ def create_app(config_class=Config):
         }
     })
 
-    # Create upload directories
+    # Create upload directories - General
     os.makedirs(app.config['IMAGE_FOLDER'], exist_ok=True)
     os.makedirs(app.config['AUDIO_FOLDER'], exist_ok=True)
+    # Create upload directories - Summary
+    os.makedirs(app.config['IMAGE_FOLDER_SUMMARY'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_SUMMARY'], exist_ok=True)
+    # Create upload directories - Deep
+    os.makedirs(app.config['IMAGE_FOLDER_DEEP'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_DEEP'], exist_ok=True)
 
     # Create database tables
     with app.app_context():
@@ -316,6 +322,398 @@ def delete_problem(uuid):
     db.session.commit()
 
     return jsonify({'message': 'Problem deleted successfully'})
+
+
+# =============================================================================
+# Summary Endpoints
+# =============================================================================
+
+@app.route('/search_summary', methods=['POST'])
+def search_problem_summary():
+    """Search for a math problem summary by image."""
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+
+    image_file = request.files['image']
+
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+
+    image_data = image_file.read()
+
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
+
+    image_hash = compute_image_hash(image_data)
+    problem = MathProblemSummary.query.filter_by(image_hash=image_hash).first()
+
+    if problem:
+        return jsonify({'uuid': problem.id})
+    else:
+        return jsonify({'uuid': None})
+
+
+@app.route('/problems_summary', methods=['POST'])
+def create_problem_summary():
+    """Create a new math problem summary."""
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
+
+    if 'solution_latex' not in request.form:
+        return jsonify({'error': 'No solution_latex provided'}), 400
+
+    image_file = request.files['image']
+    audio_file = request.files['audio']
+    solution_latex = request.form['solution_latex']
+
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
+
+    if not solution_latex.strip():
+        return jsonify({'error': 'solution_latex cannot be empty'}), 400
+
+    image_data = image_file.read()
+
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
+
+    image_hash = compute_image_hash(image_data)
+
+    existing = MathProblemSummary.query.filter_by(image_hash=image_hash).first()
+    if existing:
+        return jsonify({
+            'error': 'A problem summary with this exact image already exists',
+            'existing_uuid': existing.id
+        }), 409
+
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
+
+    problem = MathProblemSummary(
+        image_hash=image_hash,
+        solution_latex=solution_latex,
+        image_path='',
+        audio_path=''
+    )
+    db.session.add(problem)
+    db.session.flush()
+
+    image_file.seek(0)
+    image_path = save_file(image_file, app.config['IMAGE_FOLDER_SUMMARY'], problem.id)
+
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_SUMMARY'], problem.id)
+
+    problem.image_path = image_path
+    problem.audio_path = audio_path
+
+    db.session.commit()
+
+    return jsonify({
+        'uuid': problem.id,
+        'message': 'Math problem summary created successfully'
+    }), 201
+
+
+@app.route('/problems_summary/<uuid>', methods=['GET'])
+def get_problem_summary(uuid):
+    """Get a math problem summary by UUID."""
+    problem = MathProblemSummary.query.get(uuid)
+
+    if not problem:
+        return jsonify({'error': 'Problem summary not found'}), 404
+
+    return jsonify({
+        'uuid': problem.id,
+        'solution_latex': problem.solution_latex,
+        'audio_url': f'/problems_summary/{problem.id}/audio',
+        'image_url': f'/problems_summary/{problem.id}/image',
+        'created_at': problem.created_at.isoformat() if problem.created_at else None
+    })
+
+
+@app.route('/problems_summary/<uuid>/audio', methods=['GET'])
+def get_problem_summary_audio(uuid):
+    """Get the audio file for a math problem summary."""
+    problem = MathProblemSummary.query.get(uuid)
+
+    if not problem:
+        return jsonify({'error': 'Problem summary not found'}), 404
+
+    if not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+
+    return send_file(problem.audio_path, as_attachment=False)
+
+
+@app.route('/problems_summary/<uuid>/image', methods=['GET'])
+def get_problem_summary_image(uuid):
+    """Get the image file for a math problem summary."""
+    problem = MathProblemSummary.query.get(uuid)
+
+    if not problem:
+        return jsonify({'error': 'Problem summary not found'}), 404
+
+    if not os.path.exists(problem.image_path):
+        return jsonify({'error': 'Image file not found'}), 404
+
+    return send_file(problem.image_path, as_attachment=False)
+
+
+@app.route('/problems_summary', methods=['GET'])
+def list_problems_summary():
+    """List all math problem summaries."""
+    page = request.args.get('page', 1, type=int)
+    per_page = min(request.args.get('per_page', 20, type=int), 100)
+
+    pagination = MathProblemSummary.query.order_by(
+        MathProblemSummary.created_at.desc()
+    ).paginate(page=page, per_page=per_page, error_out=False)
+
+    problems = [{
+        'uuid': p.id,
+        'image_url': f'/problems_summary/{p.id}/image',
+        'created_at': p.created_at.isoformat() if p.created_at else None
+    } for p in pagination.items]
+
+    return jsonify({
+        'problems': problems,
+        'total': pagination.total,
+        'page': pagination.page,
+        'per_page': pagination.per_page,
+        'pages': pagination.pages
+    })
+
+
+@app.route('/problems_summary/<uuid>', methods=['DELETE'])
+def delete_problem_summary(uuid):
+    """Delete a math problem summary by UUID."""
+    problem = MathProblemSummary.query.get(uuid)
+
+    if not problem:
+        return jsonify({'error': 'Problem summary not found'}), 404
+
+    if os.path.exists(problem.image_path):
+        os.remove(problem.image_path)
+    if os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
+
+    db.session.delete(problem)
+    db.session.commit()
+
+    return jsonify({'message': 'Problem summary deleted successfully'})
+
+
+# =============================================================================
+# Deep Endpoints
+# =============================================================================
+
+@app.route('/search_deep', methods=['POST'])
+def search_problem_deep():
+    """Search for a deep math problem by image."""
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+
+    image_file = request.files['image']
+
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+
+    image_data = image_file.read()
+
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
+
+    image_hash = compute_image_hash(image_data)
+    problem = MathProblemDeep.query.filter_by(image_hash=image_hash).first()
+
+    if problem:
+        return jsonify({'uuid': problem.id})
+    else:
+        return jsonify({'uuid': None})
+
+
+@app.route('/problems_deep', methods=['POST'])
+def create_problem_deep():
+    """Create a new deep math problem."""
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
+
+    if 'solution_latex' not in request.form:
+        return jsonify({'error': 'No solution_latex provided'}), 400
+
+    image_file = request.files['image']
+    audio_file = request.files['audio']
+    solution_latex = request.form['solution_latex']
+
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
+
+    if not solution_latex.strip():
+        return jsonify({'error': 'solution_latex cannot be empty'}), 400
+
+    image_data = image_file.read()
+
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
+
+    image_hash = compute_image_hash(image_data)
+
+    existing = MathProblemDeep.query.filter_by(image_hash=image_hash).first()
+    if existing:
+        return jsonify({
+            'error': 'A deep problem with this exact image already exists',
+            'existing_uuid': existing.id
+        }), 409
+
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
+
+    problem = MathProblemDeep(
+        image_hash=image_hash,
+        solution_latex=solution_latex,
+        image_path='',
+        audio_path=''
+    )
+    db.session.add(problem)
+    db.session.flush()
+
+    image_file.seek(0)
+    image_path = save_file(image_file, app.config['IMAGE_FOLDER_DEEP'], problem.id)
+
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_DEEP'], problem.id)
+
+    problem.image_path = image_path
+    problem.audio_path = audio_path
+
+    db.session.commit()
+
+    return jsonify({
+        'uuid': problem.id,
+        'message': 'Deep math problem created successfully'
+    }), 201
+
+
+@app.route('/problems_deep/<uuid>', methods=['GET'])
+def get_problem_deep(uuid):
+    """Get a deep math problem by UUID."""
+    problem = MathProblemDeep.query.get(uuid)
+
+    if not problem:
+        return jsonify({'error': 'Deep problem not found'}), 404
+
+    return jsonify({
+        'uuid': problem.id,
+        'solution_latex': problem.solution_latex,
+        'audio_url': f'/problems_deep/{problem.id}/audio',
+        'image_url': f'/problems_deep/{problem.id}/image',
+        'created_at': problem.created_at.isoformat() if problem.created_at else None
+    })
+
+
+@app.route('/problems_deep/<uuid>/audio', methods=['GET'])
+def get_problem_deep_audio(uuid):
+    """Get the audio file for a deep math problem."""
+    problem = MathProblemDeep.query.get(uuid)
+
+    if not problem:
+        return jsonify({'error': 'Deep problem not found'}), 404
+
+    if not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+
+    return send_file(problem.audio_path, as_attachment=False)
+
+
+@app.route('/problems_deep/<uuid>/image', methods=['GET'])
+def get_problem_deep_image(uuid):
+    """Get the image file for a deep math problem."""
+    problem = MathProblemDeep.query.get(uuid)
+
+    if not problem:
+        return jsonify({'error': 'Deep problem not found'}), 404
+
+    if not os.path.exists(problem.image_path):
+        return jsonify({'error': 'Image file not found'}), 404
+
+    return send_file(problem.image_path, as_attachment=False)
+
+
+@app.route('/problems_deep', methods=['GET'])
+def list_problems_deep():
+    """List all deep math problems."""
+    page = request.args.get('page', 1, type=int)
+    per_page = min(request.args.get('per_page', 20, type=int), 100)
+
+    pagination = MathProblemDeep.query.order_by(
+        MathProblemDeep.created_at.desc()
+    ).paginate(page=page, per_page=per_page, error_out=False)
+
+    problems = [{
+        'uuid': p.id,
+        'image_url': f'/problems_deep/{p.id}/image',
+        'created_at': p.created_at.isoformat() if p.created_at else None
+    } for p in pagination.items]
+
+    return jsonify({
+        'problems': problems,
+        'total': pagination.total,
+        'page': pagination.page,
+        'per_page': pagination.per_page,
+        'pages': pagination.pages
+    })
+
+
+@app.route('/problems_deep/<uuid>', methods=['DELETE'])
+def delete_problem_deep(uuid):
+    """Delete a deep math problem by UUID."""
+    problem = MathProblemDeep.query.get(uuid)
+
+    if not problem:
+        return jsonify({'error': 'Deep problem not found'}), 404
+
+    if os.path.exists(problem.image_path):
+        os.remove(problem.image_path)
+    if os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
+
+    db.session.delete(problem)
+    db.session.commit()
+
+    return jsonify({'message': 'Deep problem deleted successfully'})
 
 
 if __name__ == '__main__':
