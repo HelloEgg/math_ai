@@ -30,3 +30,6 @@ class Config:
     # Max file sizes (in bytes)
     MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
     MAX_AUDIO_SIZE = 50 * 1024 * 1024  # 50 MB
+
+    # Gemini API
+    GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')

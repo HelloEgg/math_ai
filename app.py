@@ -1,8 +1,11 @@
 import os
 import hashlib
+import json
+import base64
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
+import google.generativeai as genai
 
 from config import Config
 from models import db, MathProblem, MathProblemSummary, MathProblemDeep
@@ -714,6 +717,134 @@ def delete_problem_deep(uuid):
     db.session.commit()
 
     return jsonify({'message': 'Deep problem deleted successfully'})
+
+
+# =============================================================================
+# Math Twin Endpoint (Gemini AI)
+# =============================================================================
+
+@app.route('/math_twin', methods=['POST'])
+def generate_math_twin():
+    """
+    Generate a twin math question from an image using Gemini AI.
+
+    Expects: multipart/form-data with 'image' file
+    Returns: JSON with 'question', 'answer', 'solution' in LaTeX format
+    """
+    # Check if Gemini API key is configured
+    if not app.config.get('GEMINI_API_KEY'):
+        return jsonify({'error': 'Gemini API key not configured. Set GEMINI_API_KEY environment variable.'}), 500
+
+    # Validate request has image
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+
+    image_file = request.files['image']
+
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+
+    # Read image data
+    image_data = image_file.read()
+
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
+
+    # Get file extension for mime type
+    filename = secure_filename(image_file.filename)
+    ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else 'png'
+    mime_type = f"image/{ext}"
+    if ext == 'jpg':
+        mime_type = 'image/jpeg'
+
+    try:
+        # Configure Gemini API
+        genai.configure(api_key=app.config['GEMINI_API_KEY'])
+
+        # Create the model
+        model = genai.GenerativeModel('gemini-1.5-flash')
+
+        # Create the prompt
+        prompt = """Analyze this math problem image and create a "twin" problem.
+
+A twin problem has the SAME structure and type of question, but with DIFFERENT numbers and/or variable names.
+
+For example:
+- Original: "What is y when y = 2x and x = 3?"
+- Twin: "What is z when z = 5w and w = 4?"
+
+Please respond in the following JSON format ONLY (no markdown, no code blocks, just pure JSON):
+{
+    "question": "The twin math question in LaTeX format",
+    "answer": "The final answer in LaTeX format",
+    "solution": "Step-by-step solution in LaTeX format"
+}
+
+Important:
+- Use LaTeX formatting for all mathematical expressions
+- The twin question should be solvable and have a clear answer
+- Make sure numbers are different from the original
+- Keep the same difficulty level
+- Respond with valid JSON only, no additional text"""
+
+        # Prepare the image for Gemini
+        image_part = {
+            "mime_type": mime_type,
+            "data": base64.b64encode(image_data).decode('utf-8')
+        }
+
+        # Generate response
+        response = model.generate_content([prompt, image_part])
+
+        # Parse the response
+        response_text = response.text.strip()
+
+        # Try to extract JSON from response (handle potential markdown code blocks)
+        if response_text.startswith('```'):
+            # Remove markdown code block
+            lines = response_text.split('\n')
+            json_lines = []
+            in_json = False
+            for line in lines:
+                if line.startswith('```') and not in_json:
+                    in_json = True
+                    continue
+                elif line.startswith('```') and in_json:
+                    break
+                elif in_json:
+                    json_lines.append(line)
+            response_text = '\n'.join(json_lines)
+
+        # Parse JSON response
+        result = json.loads(response_text)
+
+        # Validate required fields
+        if 'question' not in result or 'answer' not in result or 'solution' not in result:
+            return jsonify({
+                'error': 'Invalid response from Gemini API',
+                'raw_response': response.text
+            }), 500
+
+        return jsonify({
+            'question': result['question'],
+            'answer': result['answer'],
+            'solution': result['solution']
+        })
+
+    except json.JSONDecodeError as e:
+        return jsonify({
+            'error': 'Failed to parse Gemini response as JSON',
+            'details': str(e),
+            'raw_response': response.text if 'response' in locals() else None
+        }), 500
+    except Exception as e:
+        return jsonify({
+            'error': 'Failed to generate twin question',
+            'details': str(e)
+        }), 500
 
 
 if __name__ == '__main__':
