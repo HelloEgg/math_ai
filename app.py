@@ -920,14 +920,16 @@ For example:
 - Original: "What is y when y = 2x and x = 3?"
 - Twin: "What is z when z = 5w and w = 4?"
 
-IMPORTANT: Also identify the locations of numbers/text in the image that need to be changed.
-For each number that changes, provide its approximate location as percentage coordinates (0-100).
+IMPORTANT: First determine if the image contains any graphs, diagrams, figures, or geometric shapes.
+- If YES (contains graphs/diagrams/figures): Provide replacements to modify the numbers/labels on the graph
+- If NO (text-only problem): Set "has_graph" to false and leave "replacements" as an empty array
 
 Please respond in the following JSON format ONLY (no markdown, no code blocks, just pure JSON):
 {
     "question": "The twin math question in LaTeX format",
     "answer": "The final answer in LaTeX format",
     "solution": "Step-by-step solution in LaTeX format",
+    "has_graph": true,
     "replacements": [
         {
             "old_text": "3",
@@ -936,19 +938,20 @@ Please respond in the following JSON format ONLY (no markdown, no code blocks, j
             "y": 10,
             "width": 5,
             "height": 4
-        },
-        {
-            "old_text": "3",
-            "new_text": "4",
-            "x": 15,
-            "y": 45,
-            "width": 5,
-            "height": 4
         }
     ]
 }
 
-Coordinate guidelines:
+For text-only problems (no graphs):
+{
+    "question": "The twin math question in LaTeX format",
+    "answer": "The final answer in LaTeX format",
+    "solution": "Step-by-step solution in LaTeX format",
+    "has_graph": false,
+    "replacements": []
+}
+
+Coordinate guidelines (only for images with graphs):
 - x: horizontal position from left edge (0 = left edge, 100 = right edge)
 - y: vertical position from top edge (0 = top edge, 100 = bottom edge)
 - width: approximate width of the text area as percentage of image width
@@ -959,8 +962,8 @@ Important:
 - The twin question should be solvable and have a clear answer
 - Make sure numbers are different from the original
 - Keep the same difficulty level
-- Provide accurate locations for ALL numbers that change in the image
-- The replacements array should contain ALL text/numbers that need to be modified
+- ONLY provide replacements if the image contains graphs, diagrams, or figures
+- For text-only math problems, do NOT provide replacements
 - Respond with valid JSON only, no additional text"""
 
         # Prepare the image for Gemini
@@ -985,9 +988,10 @@ Important:
                 'raw_response': response.text
             }), 500
 
-        # Modify the image if replacements are provided
+        # Modify the image only if has_graph is true and replacements are provided
         modified_image_uuid = None
-        if 'replacements' in result and len(result['replacements']) > 0:
+        has_graph = result.get('has_graph', False)
+        if has_graph and 'replacements' in result and len(result['replacements']) > 0:
             try:
                 modified_image_data = modify_image_with_replacements(image_data, result['replacements'])
                 # Generate UUID and save image to disk
@@ -1002,12 +1006,11 @@ Important:
         response_data = {
             'question': result['question'],
             'answer': result['answer'],
-            'solution': result['solution']
+            'solution': result['solution'],
+            'has_graph': has_graph,
+            'modified_image_id': modified_image_uuid,
+            'modified_image_url': f"/math_twin/images/{modified_image_uuid}" if modified_image_uuid else None
         }
-
-        if modified_image_uuid:
-            response_data['modified_image_id'] = modified_image_uuid
-            response_data['modified_image_url'] = f"/math_twin/images/{modified_image_uuid}"
 
         if 'replacements' in result:
             response_data['replacements'] = result['replacements']
