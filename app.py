@@ -765,7 +765,7 @@ def generate_math_twin():
         genai.configure(api_key=app.config['GEMINI_API_KEY'])
 
         # Create the model
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.0-flash')
 
         # Create the prompt
         prompt = """Analyze this math problem image and create a "twin" problem.
