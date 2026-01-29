@@ -3,6 +3,7 @@ import hashlib
 import json
 import base64
 import io
+import uuid
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
@@ -39,6 +40,8 @@ def create_app(config_class=Config):
     # Create upload directories - Deep
     os.makedirs(app.config['IMAGE_FOLDER_DEEP'], exist_ok=True)
     os.makedirs(app.config['AUDIO_FOLDER_DEEP'], exist_ok=True)
+    # Create upload directories - Math Twin
+    os.makedirs(app.config['IMAGE_FOLDER_TWIN'], exist_ok=True)
 
     # Create database tables
     with app.app_context():
@@ -725,6 +728,39 @@ def delete_problem_deep(uuid):
 # Math Twin Endpoint (Gemini AI) with Image Modification
 # =============================================================================
 
+@app.route('/math_twin/images/<image_uuid>', methods=['GET'])
+def get_math_twin_image(image_uuid):
+    """
+    Get a modified math twin image by UUID.
+
+    Query params:
+        - download: if set to 'true', forces download with filename
+
+    Returns: Image file (PNG)
+    """
+    # Validate UUID format
+    try:
+        uuid.UUID(image_uuid)
+    except ValueError:
+        return jsonify({'error': 'Invalid image UUID format'}), 400
+
+    image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{image_uuid}.png")
+
+    if not os.path.exists(image_path):
+        return jsonify({'error': 'Image not found'}), 404
+
+    # Check if download is requested
+    download = request.args.get('download', '').lower() == 'true'
+
+    if download:
+        return send_file(
+            image_path,
+            as_attachment=True,
+            download_name=f"math_twin_{image_uuid}.png"
+        )
+    else:
+        return send_file(image_path, mimetype='image/png')
+
 def extract_json_from_response(response_text):
     """Extract JSON from response, handling markdown code blocks."""
     response_text = response_text.strip()
@@ -950,11 +986,15 @@ Important:
             }), 500
 
         # Modify the image if replacements are provided
-        modified_image_base64 = None
+        modified_image_uuid = None
         if 'replacements' in result and len(result['replacements']) > 0:
             try:
                 modified_image_data = modify_image_with_replacements(image_data, result['replacements'])
-                modified_image_base64 = base64.b64encode(modified_image_data).decode('utf-8')
+                # Generate UUID and save image to disk
+                modified_image_uuid = str(uuid.uuid4())
+                image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{modified_image_uuid}.png")
+                with open(image_path, 'wb') as f:
+                    f.write(modified_image_data)
             except Exception as e:
                 # If image modification fails, continue without it
                 print(f"Warning: Image modification failed: {e}")
@@ -965,9 +1005,9 @@ Important:
             'solution': result['solution']
         }
 
-        if modified_image_base64:
-            response_data['modified_image'] = modified_image_base64
-            response_data['modified_image_url'] = f"data:image/png;base64,{modified_image_base64}"
+        if modified_image_uuid:
+            response_data['modified_image_id'] = modified_image_uuid
+            response_data['modified_image_url'] = f"/math_twin/images/{modified_image_uuid}"
 
         if 'replacements' in result:
             response_data['replacements'] = result['replacements']
