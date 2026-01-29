@@ -2,10 +2,12 @@ import os
 import hashlib
 import json
 import base64
+import io
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import google.generativeai as genai
+from PIL import Image, ImageDraw, ImageFont
 
 from config import Config
 from models import db, MathProblem, MathProblemSummary, MathProblemDeep
@@ -720,16 +722,122 @@ def delete_problem_deep(uuid):
 
 
 # =============================================================================
-# Math Twin Endpoint (Gemini AI)
+# Math Twin Endpoint (Gemini AI) with Image Modification
 # =============================================================================
+
+def extract_json_from_response(response_text):
+    """Extract JSON from response, handling markdown code blocks."""
+    response_text = response_text.strip()
+    if response_text.startswith('```'):
+        lines = response_text.split('\n')
+        json_lines = []
+        in_json = False
+        for line in lines:
+            if line.startswith('```') and not in_json:
+                in_json = True
+                continue
+            elif line.startswith('```') and in_json:
+                break
+            elif in_json:
+                json_lines.append(line)
+        response_text = '\n'.join(json_lines)
+    return response_text
+
+
+def modify_image_with_replacements(image_data, replacements):
+    """
+    Modify image by drawing white boxes over old text and writing new text.
+
+    replacements: list of dicts with keys:
+        - old_text: original text to cover
+        - new_text: new text to write
+        - x: x coordinate (percentage of image width, 0-100)
+        - y: y coordinate (percentage of image height, 0-100)
+        - width: width of text area (percentage, 0-100)
+        - height: height of text area (percentage, 0-100)
+    """
+    # Open image
+    img = Image.open(io.BytesIO(image_data))
+
+    # Convert to RGB if necessary (handles PNG with transparency)
+    if img.mode in ('RGBA', 'P'):
+        # Create white background
+        background = Image.new('RGB', img.size, (255, 255, 255))
+        if img.mode == 'P':
+            img = img.convert('RGBA')
+        background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+        img = background
+    elif img.mode != 'RGB':
+        img = img.convert('RGB')
+
+    draw = ImageDraw.Draw(img)
+    img_width, img_height = img.size
+
+    # Try to load a font, fall back to default
+    font = None
+    font_sizes_to_try = [24, 20, 18, 16, 14, 12]
+
+    for font_size in font_sizes_to_try:
+        try:
+            # Try common font paths
+            font_paths = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                "/System/Library/Fonts/Helvetica.ttc",
+                "C:\\Windows\\Fonts\\arial.ttf",
+            ]
+            for font_path in font_paths:
+                if os.path.exists(font_path):
+                    font = ImageFont.truetype(font_path, font_size)
+                    break
+            if font:
+                break
+        except:
+            continue
+
+    if font is None:
+        font = ImageFont.load_default()
+
+    for replacement in replacements:
+        try:
+            # Convert percentage coordinates to pixels
+            x = int((replacement.get('x', 0) / 100) * img_width)
+            y = int((replacement.get('y', 0) / 100) * img_height)
+            width = int((replacement.get('width', 10) / 100) * img_width)
+            height = int((replacement.get('height', 5) / 100) * img_height)
+
+            # Draw white rectangle to cover old text
+            padding = 2
+            draw.rectangle(
+                [x - padding, y - padding, x + width + padding, y + height + padding],
+                fill='white'
+            )
+
+            # Draw new text
+            new_text = replacement.get('new_text', '')
+            draw.text((x, y), new_text, fill='black', font=font)
+
+        except Exception as e:
+            # Continue with other replacements if one fails
+            print(f"Warning: Failed to apply replacement: {e}")
+            continue
+
+    # Save to bytes
+    output = io.BytesIO()
+    img.save(output, format='PNG')
+    output.seek(0)
+    return output.getvalue()
+
 
 @app.route('/math_twin', methods=['POST'])
 def generate_math_twin():
     """
     Generate a twin math question from an image using Gemini AI.
+    Also modifies the image to show the new numbers.
 
     Expects: multipart/form-data with 'image' file
-    Returns: JSON with 'question', 'answer', 'solution' in LaTeX format
+    Returns: JSON with 'question', 'answer', 'solution' in LaTeX format, plus 'modified_image' as base64
     """
     # Check if Gemini API key is configured
     if not app.config.get('GEMINI_API_KEY'):
@@ -767,7 +875,7 @@ def generate_math_twin():
         # Create the model
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # Create the prompt
+        # Create the prompt that also asks for text replacement locations
         prompt = """Analyze this math problem image and create a "twin" problem.
 
 A twin problem has the SAME structure and type of question, but with DIFFERENT numbers and/or variable names.
@@ -776,18 +884,47 @@ For example:
 - Original: "What is y when y = 2x and x = 3?"
 - Twin: "What is z when z = 5w and w = 4?"
 
+IMPORTANT: Also identify the locations of numbers/text in the image that need to be changed.
+For each number that changes, provide its approximate location as percentage coordinates (0-100).
+
 Please respond in the following JSON format ONLY (no markdown, no code blocks, just pure JSON):
 {
     "question": "The twin math question in LaTeX format",
     "answer": "The final answer in LaTeX format",
-    "solution": "Step-by-step solution in LaTeX format"
+    "solution": "Step-by-step solution in LaTeX format",
+    "replacements": [
+        {
+            "old_text": "3",
+            "new_text": "4",
+            "x": 25,
+            "y": 10,
+            "width": 5,
+            "height": 4
+        },
+        {
+            "old_text": "3",
+            "new_text": "4",
+            "x": 15,
+            "y": 45,
+            "width": 5,
+            "height": 4
+        }
+    ]
 }
 
+Coordinate guidelines:
+- x: horizontal position from left edge (0 = left edge, 100 = right edge)
+- y: vertical position from top edge (0 = top edge, 100 = bottom edge)
+- width: approximate width of the text area as percentage of image width
+- height: approximate height of the text area as percentage of image height
+
 Important:
-- Use LaTeX formatting for all mathematical expressions
+- Use LaTeX formatting for all mathematical expressions in question/answer/solution
 - The twin question should be solvable and have a clear answer
 - Make sure numbers are different from the original
 - Keep the same difficulty level
+- Provide accurate locations for ALL numbers that change in the image
+- The replacements array should contain ALL text/numbers that need to be modified
 - Respond with valid JSON only, no additional text"""
 
         # Prepare the image for Gemini
@@ -800,23 +937,7 @@ Important:
         response = model.generate_content([prompt, image_part])
 
         # Parse the response
-        response_text = response.text.strip()
-
-        # Try to extract JSON from response (handle potential markdown code blocks)
-        if response_text.startswith('```'):
-            # Remove markdown code block
-            lines = response_text.split('\n')
-            json_lines = []
-            in_json = False
-            for line in lines:
-                if line.startswith('```') and not in_json:
-                    in_json = True
-                    continue
-                elif line.startswith('```') and in_json:
-                    break
-                elif in_json:
-                    json_lines.append(line)
-            response_text = '\n'.join(json_lines)
+        response_text = extract_json_from_response(response.text)
 
         # Parse JSON response
         result = json.loads(response_text)
@@ -828,11 +949,30 @@ Important:
                 'raw_response': response.text
             }), 500
 
-        return jsonify({
+        # Modify the image if replacements are provided
+        modified_image_base64 = None
+        if 'replacements' in result and len(result['replacements']) > 0:
+            try:
+                modified_image_data = modify_image_with_replacements(image_data, result['replacements'])
+                modified_image_base64 = base64.b64encode(modified_image_data).decode('utf-8')
+            except Exception as e:
+                # If image modification fails, continue without it
+                print(f"Warning: Image modification failed: {e}")
+
+        response_data = {
             'question': result['question'],
             'answer': result['answer'],
             'solution': result['solution']
-        })
+        }
+
+        if modified_image_base64:
+            response_data['modified_image'] = modified_image_base64
+            response_data['modified_image_url'] = f"data:image/png;base64,{modified_image_base64}"
+
+        if 'replacements' in result:
+            response_data['replacements'] = result['replacements']
+
+        return jsonify(response_data)
 
     except json.JSONDecodeError as e:
         return jsonify({
