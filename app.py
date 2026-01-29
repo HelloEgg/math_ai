@@ -764,9 +764,9 @@ def get_math_twin_image(image_uuid):
 def fix_latex_escaping(text):
     """
     Fix LaTeX backslash escaping in JSON strings.
-    Gemini often returns unescaped LaTeX like \frac which breaks JSON parsing.
+    Gemini often returns unescaped LaTeX like \\frac which breaks JSON parsing.
 
-    In JSON, valid escape sequences are: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+    In JSON, valid escape sequences are: \\", \\\\, \\/, \\b, \\f, \\n, \\r, \\t, \\uXXXX
     Any other backslash followed by a character is invalid and needs to be escaped.
     """
     import re
