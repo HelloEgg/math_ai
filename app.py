@@ -761,6 +761,33 @@ def get_math_twin_image(image_uuid):
     else:
         return send_file(image_path, mimetype='image/png')
 
+def fix_latex_escaping(text):
+    """
+    Fix LaTeX backslash escaping in JSON strings.
+    Gemini often returns unescaped LaTeX like \frac which breaks JSON parsing.
+
+    In JSON, valid escape sequences are: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+    Any other backslash followed by a character is invalid and needs to be escaped.
+    """
+    import re
+
+    # Find backslashes not followed by valid JSON escape characters
+    # Valid JSON escapes: " \ / b f n r t u
+    # We need to escape backslashes followed by anything else (like LaTeX commands)
+    def escape_invalid_backslash(match):
+        char_after = match.group(1)
+        # If it's already a valid JSON escape, leave it alone
+        if char_after in '"\\\/bfnrtu':
+            return match.group(0)
+        # Otherwise, escape the backslash
+        return '\\\\' + char_after
+
+    # Match backslash followed by any character
+    text = re.sub(r'\\([^\\])', escape_invalid_backslash, text)
+
+    return text
+
+
 def extract_json_from_response(response_text):
     """Extract JSON from response, handling markdown code blocks."""
     response_text = response_text.strip()
@@ -777,6 +804,10 @@ def extract_json_from_response(response_text):
             elif in_json:
                 json_lines.append(line)
         response_text = '\n'.join(json_lines)
+
+    # Fix LaTeX escaping issues
+    response_text = fix_latex_escaping(response_text)
+
     return response_text
 
 
