@@ -769,23 +769,41 @@ def fix_latex_escaping(text):
     In JSON, valid escape sequences are: \\", \\\\, \\/, \\b, \\f, \\n, \\r, \\t, \\uXXXX
     Any other backslash followed by a character is invalid and needs to be escaped.
     """
-    import re
+    # Process character by character to handle mixed escaping
+    result = []
+    i = 0
+    while i < len(text):
+        if text[i] == '\\':
+            if i + 1 < len(text):
+                next_char = text[i + 1]
+                # Check if already escaped (double backslash)
+                if next_char == '\\':
+                    # Already escaped, keep both
+                    result.append('\\\\')
+                    i += 2
+                    continue
+                # Check if it's a valid JSON escape
+                elif next_char in '"\/bfnrtu':
+                    # Valid JSON escape, keep as is
+                    result.append('\\')
+                    result.append(next_char)
+                    i += 2
+                    continue
+                else:
+                    # Invalid escape (like \frac, \(, etc.), add extra backslash
+                    result.append('\\\\')
+                    result.append(next_char)
+                    i += 2
+                    continue
+            else:
+                # Trailing backslash, keep it
+                result.append('\\')
+                i += 1
+        else:
+            result.append(text[i])
+            i += 1
 
-    # Find backslashes not followed by valid JSON escape characters
-    # Valid JSON escapes: " \ / b f n r t u
-    # We need to escape backslashes followed by anything else (like LaTeX commands)
-    def escape_invalid_backslash(match):
-        char_after = match.group(1)
-        # If it's already a valid JSON escape, leave it alone
-        if char_after in '"\\\/bfnrtu':
-            return match.group(0)
-        # Otherwise, escape the backslash
-        return '\\\\' + char_after
-
-    # Match backslash followed by any character
-    text = re.sub(r'\\([^\\])', escape_invalid_backslash, text)
-
-    return text
+    return ''.join(result)
 
 
 def extract_json_from_response(response_text):
