@@ -829,113 +829,68 @@ def extract_json_from_response(response_text):
     return response_text
 
 
-def modify_image_with_replacements(image_data, replacements):
+def generate_new_graph_image(api_key, graph_description):
     """
-    Modify image by using Gemini-provided coordinates to replace text.
+    Generate a new graph image using Gemini's image generation.
 
-    replacements: list of dicts with keys:
-        - old_text: original text to cover
-        - new_text: new text to write
-        - x: x coordinate (percentage of image width, 0-100)
-        - y: y coordinate (percentage of image height, 0-100)
-        - width: width of text area (percentage, 0-100) - optional
-        - height: height of text area (percentage, 0-100) - optional
+    Args:
+        api_key: Gemini API key
+        graph_description: Detailed description of the graph to generate
+
+    Returns:
+        Image data as bytes, or None if generation fails
     """
-    # Open image
-    img = Image.open(io.BytesIO(image_data))
+    try:
+        genai.configure(api_key=api_key)
 
-    # Convert to RGB if necessary (handles PNG with transparency)
-    if img.mode in ('RGBA', 'P'):
-        # Create white background
-        background = Image.new('RGB', img.size, (255, 255, 255))
-        if img.mode == 'P':
-            img = img.convert('RGBA')
-        background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-        img = background
-    elif img.mode != 'RGB':
-        img = img.convert('RGB')
+        # Use Gemini 2.0 Flash with image generation
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
-    draw = ImageDraw.Draw(img)
-    img_width, img_height = img.size
+        prompt = f"""Generate a clean, mathematical graph image based on this description:
 
-    print(f"Image size: {img_width}x{img_height}")
-    print(f"Processing {len(replacements)} replacements")
+{graph_description}
 
-    for replacement in replacements:
-        try:
-            old_text = replacement.get('old_text', '')
-            new_text = replacement.get('new_text', '')
+Requirements:
+- Draw on a white background
+- Use black lines for axes and curves
+- Label axes clearly with x and y
+- Show the equations near their curves
+- Use a shaded region if specified
+- Make it look like a textbook math problem graph
+- Keep the style simple and clean
+- Include any specified labels and numbers"""
 
-            # Get coordinates (as percentages)
-            x_pct = replacement.get('x', 0)
-            y_pct = replacement.get('y', 0)
-            width_pct = replacement.get('width', 5)  # Default 5% width
-            height_pct = replacement.get('height', 4)  # Default 4% height
-
-            # Convert percentage to pixels
-            x = int((x_pct / 100) * img_width)
-            y = int((y_pct / 100) * img_height)
-            width = int((width_pct / 100) * img_width)
-            height = int((height_pct / 100) * img_height)
-
-            # Ensure minimum size
-            width = max(width, 20)
-            height = max(height, 15)
-
-            print(f"Replacing '{old_text}' with '{new_text}' at ({x}, {y}) size {width}x{height}")
-
-            # Load font with appropriate size
-            font = None
-            font_size = max(height - 4, 12)
-            font_paths = [
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-                "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-                "/usr/share/fonts/TTF/DejaVuSans.ttf",
-                "/System/Library/Fonts/Helvetica.ttc",
-                "C:\\Windows\\Fonts\\arial.ttf",
-            ]
-            for font_path in font_paths:
-                if os.path.exists(font_path):
-                    try:
-                        font = ImageFont.truetype(font_path, font_size)
-                        break
-                    except:
-                        continue
-
-            if font is None:
-                font = ImageFont.load_default()
-
-            # Draw white rectangle to cover old text
-            padding = 3
-            draw.rectangle(
-                [x - padding, y - padding, x + width + padding, y + height + padding],
-                fill='white'
+        # Generate with image output
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.GenerationConfig(
+                response_modalities=['image', 'text']
             )
+        )
 
-            # Draw new text
-            draw.text((x, y), new_text, fill='black', font=font)
-            print(f"  -> Done replacing at pixel ({x}, {y})")
+        # Extract image from response
+        for part in response.candidates[0].content.parts:
+            if hasattr(part, 'inline_data') and part.inline_data:
+                image_data = part.inline_data.data
+                print(f"Generated image: {len(image_data)} bytes")
+                return image_data
 
-        except Exception as e:
-            print(f"Warning: Failed to apply replacement: {e}")
-            continue
+        print("No image in Gemini response")
+        return None
 
-    # Save to bytes
-    output = io.BytesIO()
-    img.save(output, format='PNG')
-    output.seek(0)
-    return output.getvalue()
+    except Exception as e:
+        print(f"Image generation failed: {e}")
+        return None
 
 
 @app.route('/math_twin', methods=['POST'])
 def generate_math_twin():
     """
     Generate a twin math question from an image using Gemini AI.
-    Also modifies the image to show the new numbers.
+    If the image has a graph, generates a completely new graph image.
 
     Expects: multipart/form-data with 'image' file
-    Returns: JSON with 'question', 'answer', 'solution' in LaTeX format, plus 'modified_image' as base64
+    Returns: JSON with 'question', 'answer', 'solution' in LaTeX format, plus generated graph image
     """
     # Check if Gemini API key is configured
     if not app.config.get('GEMINI_API_KEY'):
@@ -970,10 +925,10 @@ def generate_math_twin():
         # Configure Gemini API
         genai.configure(api_key=app.config['GEMINI_API_KEY'])
 
-        # Create the model
+        # Create the model for analysis
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # Create the prompt with coordinate requirements
+        # Create the prompt - now includes graph_description for image generation
         prompt = """Analyze this math problem image and create a "twin" problem.
 
 A twin problem has the SAME structure and type of question, but with DIFFERENT numbers and/or variable names.
@@ -983,14 +938,8 @@ For example:
 - Twin: "What is z when z = 5w and w = 4?"
 
 IMPORTANT: First determine if the image contains any graphs, diagrams, figures, or geometric shapes.
-- If YES (contains graphs/diagrams/figures): Provide replacements with PRECISE coordinates for each number/text to change
-- If NO (text-only problem): Set "has_graph" to false and leave "replacements" as an empty array
-
-For replacements, you MUST provide exact coordinates as percentages (0-100) of where the text appears in the image:
-- x: horizontal position from LEFT edge (0 = left, 100 = right)
-- y: vertical position from TOP edge (0 = top, 100 = bottom)
-- width: width of text area as percentage (typically 3-8 for single digits)
-- height: height of text area as percentage (typically 3-6)
+- If YES (contains graphs/diagrams/figures): Set has_graph to true and provide a detailed graph_description
+- If NO (text-only problem): Set has_graph to false and leave graph_description empty
 
 Please respond in the following JSON format ONLY (no markdown, no code blocks, just pure JSON):
 {
@@ -998,10 +947,7 @@ Please respond in the following JSON format ONLY (no markdown, no code blocks, j
     "answer": "The final answer in LaTeX format",
     "solution": "Step-by-step solution in LaTeX format",
     "has_graph": true,
-    "replacements": [
-        {"old_text": "2", "new_text": "3", "x": 75, "y": 85, "width": 4, "height": 4},
-        {"old_text": "5", "new_text": "6", "x": 20, "y": 30, "width": 3, "height": 4}
-    ]
+    "graph_description": "A detailed description of the NEW graph to generate. Include: 1) The coordinate system (x and y axes ranges), 2) All curves/functions to draw with their equations, 3) Any shaded regions, 4) All labels and their positions, 5) Any vertical/horizontal lines, 6) The intersection points if any. Be very specific so the graph can be accurately recreated."
 }
 
 For text-only problems (no graphs):
@@ -1010,23 +956,22 @@ For text-only problems (no graphs):
     "answer": "The final answer in LaTeX format",
     "solution": "Step-by-step solution in LaTeX format",
     "has_graph": false,
-    "replacements": []
+    "graph_description": ""
 }
 
-CRITICAL for coordinates:
-- Look carefully at WHERE each number appears in the image
-- x=0 is the LEFT edge, x=100 is the RIGHT edge
-- y=0 is the TOP edge, y=100 is the BOTTOM edge
-- For a number in the bottom-right area of the graph, x might be 70-90 and y might be 80-95
-- Be as precise as possible - the coordinates will be used to place white boxes over the old numbers
+CRITICAL for graph_description:
+- Describe the TWIN problem's graph, not the original
+- Include specific equations like "y = x^2 + 4" and "y = -1/6 * x^2 + 4"
+- Specify axis ranges like "x-axis from -3 to 5, y-axis from -2 to 8"
+- Describe shaded regions like "shade the area between the two curves from x=0 to x=3"
+- Include all labels: axis labels, equation labels near curves, point labels
+- Mention any special features: vertical lines like "x = 3", intersection points, etc.
 
 Important:
 - Use LaTeX formatting for all mathematical expressions in question/answer/solution
 - The twin question should be solvable and have a clear answer
 - Make sure numbers are different from the original
 - Keep the same difficulty level
-- ONLY provide replacements if the image contains graphs, diagrams, or figures
-- For text-only math problems, do NOT provide replacements
 - Respond with valid JSON only, no additional text"""
 
         # Prepare the image for Gemini
@@ -1051,32 +996,44 @@ Important:
                 'raw_response': response.text
             }), 500
 
-        # Modify the image only if has_graph is true and replacements are provided
-        modified_image_uuid = None
+        # Generate new graph image if has_graph is true and graph_description is provided
+        generated_image_uuid = None
         has_graph = result.get('has_graph', False)
-        if has_graph and 'replacements' in result and len(result['replacements']) > 0:
+        graph_description = result.get('graph_description', '')
+
+        if has_graph and graph_description:
             try:
-                modified_image_data = modify_image_with_replacements(image_data, result['replacements'])
-                # Generate UUID and save image to disk
-                modified_image_uuid = str(uuid.uuid4())
-                image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{modified_image_uuid}.png")
-                with open(image_path, 'wb') as f:
-                    f.write(modified_image_data)
+                print(f"Generating new graph with description: {graph_description[:200]}...")
+
+                # Generate new graph image using Gemini
+                generated_image_data = generate_new_graph_image(
+                    app.config['GEMINI_API_KEY'],
+                    graph_description
+                )
+
+                if generated_image_data:
+                    # Save generated image to disk
+                    generated_image_uuid = str(uuid.uuid4())
+                    image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
+                    with open(image_path, 'wb') as f:
+                        f.write(generated_image_data)
+                    print(f"Saved generated image: {generated_image_uuid}")
+                else:
+                    print("Image generation returned no data")
+
             except Exception as e:
-                # If image modification fails, continue without it
-                print(f"Warning: Image modification failed: {e}")
+                # If image generation fails, continue without it
+                print(f"Warning: Image generation failed: {e}")
 
         response_data = {
             'question': result['question'],
             'answer': result['answer'],
             'solution': result['solution'],
             'has_graph': has_graph,
-            'modified_image_id': modified_image_uuid,
-            'modified_image_url': f"/math_twin/images/{modified_image_uuid}" if modified_image_uuid else None
+            'graph_description': graph_description if has_graph else None,
+            'modified_image_id': generated_image_uuid,
+            'modified_image_url': f"/math_twin/images/{generated_image_uuid}" if generated_image_uuid else None
         }
-
-        if 'replacements' in result:
-            response_data['replacements'] = result['replacements']
 
         return jsonify(response_data)
 
