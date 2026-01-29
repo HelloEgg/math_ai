@@ -9,7 +9,6 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import google.generativeai as genai
 from PIL import Image, ImageDraw, ImageFont
-import pytesseract
 
 from config import Config
 from models import db, MathProblem, MathProblemSummary, MathProblemDeep
@@ -830,75 +829,17 @@ def extract_json_from_response(response_text):
     return response_text
 
 
-def find_text_locations_ocr(img):
-    """
-    Use OCR to find all text locations in an image.
-    Returns a list of dicts with text, x, y, width, height.
-    """
-    text_locations = []
-
-    # Try multiple OCR configurations for better detection
-    # PSM modes: 6 = uniform block of text, 11 = sparse text, 12 = sparse text with OSD
-    configs = [
-        '--psm 11',  # Sparse text - good for scattered numbers
-        '--psm 6',   # Uniform block of text
-        '--psm 12',  # Sparse text with OSD
-    ]
-
-    for config in configs:
-        try:
-            # Try with Korean + English if available
-            try:
-                ocr_data = pytesseract.image_to_data(
-                    img,
-                    output_type=pytesseract.Output.DICT,
-                    config=config,
-                    lang='kor+eng'
-                )
-            except:
-                # Fall back to English only
-                ocr_data = pytesseract.image_to_data(
-                    img,
-                    output_type=pytesseract.Output.DICT,
-                    config=config
-                )
-
-            n_boxes = len(ocr_data['text'])
-
-            for i in range(n_boxes):
-                text = ocr_data['text'][i].strip()
-                conf = int(ocr_data['conf'][i])
-
-                # Skip empty text, accept any confidence > -1
-                if text and conf > -1:
-                    loc = {
-                        'text': text,
-                        'x': ocr_data['left'][i],
-                        'y': ocr_data['top'][i],
-                        'width': ocr_data['width'][i],
-                        'height': ocr_data['height'][i],
-                        'conf': conf
-                    }
-                    # Avoid duplicates
-                    if not any(t['text'] == text and t['x'] == loc['x'] and t['y'] == loc['y']
-                               for t in text_locations):
-                        text_locations.append(loc)
-
-        except Exception as e:
-            print(f"OCR config {config} failed: {e}")
-            continue
-
-    print(f"OCR detected {len(text_locations)} text items: {[t['text'] for t in text_locations]}")
-    return text_locations
-
-
 def modify_image_with_replacements(image_data, replacements):
     """
-    Modify image by using OCR to find text locations and replacing them.
+    Modify image by using Gemini-provided coordinates to replace text.
 
     replacements: list of dicts with keys:
-        - old_text: original text to find and cover
+        - old_text: original text to cover
         - new_text: new text to write
+        - x: x coordinate (percentage of image width, 0-100)
+        - y: y coordinate (percentage of image height, 0-100)
+        - width: width of text area (percentage, 0-100) - optional
+        - height: height of text area (percentage, 0-100) - optional
     """
     # Open image
     img = Image.open(io.BytesIO(image_data))
@@ -914,87 +855,71 @@ def modify_image_with_replacements(image_data, replacements):
     elif img.mode != 'RGB':
         img = img.convert('RGB')
 
-    # Find all text locations using OCR
-    text_locations = find_text_locations_ocr(img)
-
     draw = ImageDraw.Draw(img)
+    img_width, img_height = img.size
 
-    # Track which replacements have been made to avoid duplicates
-    replacements_made = []
+    print(f"Image size: {img_width}x{img_height}")
+    print(f"Processing {len(replacements)} replacements")
 
     for replacement in replacements:
-        old_text = replacement.get('old_text', '').strip()
-        new_text = replacement.get('new_text', '').strip()
+        try:
+            old_text = replacement.get('old_text', '')
+            new_text = replacement.get('new_text', '')
 
-        if not old_text:
-            continue
+            # Get coordinates (as percentages)
+            x_pct = replacement.get('x', 0)
+            y_pct = replacement.get('y', 0)
+            width_pct = replacement.get('width', 5)  # Default 5% width
+            height_pct = replacement.get('height', 4)  # Default 4% height
 
-        print(f"Looking for '{old_text}' to replace with '{new_text}'")
+            # Convert percentage to pixels
+            x = int((x_pct / 100) * img_width)
+            y = int((y_pct / 100) * img_height)
+            width = int((width_pct / 100) * img_width)
+            height = int((height_pct / 100) * img_height)
 
-        # Find all matching text locations
-        for loc in text_locations:
-            # Check if this location matches and hasn't been replaced yet
-            loc_key = (loc['x'], loc['y'])
-            detected_text = loc['text']
+            # Ensure minimum size
+            width = max(width, 20)
+            height = max(height, 15)
 
-            # Flexible matching: exact match, contains, or OCR detected text contains old_text
-            is_match = (
-                detected_text == old_text or  # Exact match
-                old_text in detected_text or  # old_text is part of detected
-                detected_text in old_text     # detected is part of old_text
+            print(f"Replacing '{old_text}' with '{new_text}' at ({x}, {y}) size {width}x{height}")
+
+            # Load font with appropriate size
+            font = None
+            font_size = max(height - 4, 12)
+            font_paths = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                "/System/Library/Fonts/Helvetica.ttc",
+                "C:\\Windows\\Fonts\\arial.ttf",
+            ]
+            for font_path in font_paths:
+                if os.path.exists(font_path):
+                    try:
+                        font = ImageFont.truetype(font_path, font_size)
+                        break
+                    except:
+                        continue
+
+            if font is None:
+                font = ImageFont.load_default()
+
+            # Draw white rectangle to cover old text
+            padding = 3
+            draw.rectangle(
+                [x - padding, y - padding, x + width + padding, y + height + padding],
+                fill='white'
             )
 
-            if is_match and loc_key not in replacements_made:
-                try:
-                    x, y = loc['x'], loc['y']
-                    width, height = loc['width'], loc['height']
+            # Draw new text
+            draw.text((x, y), new_text, fill='black', font=font)
+            print(f"  -> Done replacing at pixel ({x}, {y})")
 
-                    # Load font with appropriate size based on detected text height
-                    font = None
-                    font_size = max(height - 2, 10)  # Slightly smaller than box height
-                    font_paths = [
-                        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-                        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-                        "/System/Library/Fonts/Helvetica.ttc",
-                        "C:\\Windows\\Fonts\\arial.ttf",
-                    ]
-                    for font_path in font_paths:
-                        if os.path.exists(font_path):
-                            try:
-                                font = ImageFont.truetype(font_path, font_size)
-                                break
-                            except:
-                                continue
-
-                    if font is None:
-                        font = ImageFont.load_default()
-
-                    # Draw white rectangle to cover old text
-                    padding = 2
-                    draw.rectangle(
-                        [x - padding, y - padding, x + width + padding, y + height + padding],
-                        fill='white'
-                    )
-
-                    # Draw new text centered in the box
-                    # Get text bounding box for centering
-                    text_bbox = draw.textbbox((0, 0), new_text, font=font)
-                    text_width = text_bbox[2] - text_bbox[0]
-                    text_height = text_bbox[3] - text_bbox[1]
-
-                    # Center the text in the original box
-                    text_x = x + (width - text_width) // 2
-                    text_y = y + (height - text_height) // 2
-
-                    draw.text((text_x, text_y), new_text, fill='black', font=font)
-
-                    replacements_made.append(loc_key)
-                    print(f"Replaced '{old_text}' with '{new_text}' at ({x}, {y})")
-
-                except Exception as e:
-                    print(f"Warning: Failed to apply replacement for '{old_text}': {e}")
-                    continue
+        except Exception as e:
+            print(f"Warning: Failed to apply replacement: {e}")
+            continue
 
     # Save to bytes
     output = io.BytesIO()
@@ -1048,7 +973,7 @@ def generate_math_twin():
         # Create the model
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # Create the prompt - OCR will find text locations automatically
+        # Create the prompt with coordinate requirements
         prompt = """Analyze this math problem image and create a "twin" problem.
 
 A twin problem has the SAME structure and type of question, but with DIFFERENT numbers and/or variable names.
@@ -1058,8 +983,14 @@ For example:
 - Twin: "What is z when z = 5w and w = 4?"
 
 IMPORTANT: First determine if the image contains any graphs, diagrams, figures, or geometric shapes.
-- If YES (contains graphs/diagrams/figures): Provide replacements specifying which text/numbers to change
+- If YES (contains graphs/diagrams/figures): Provide replacements with PRECISE coordinates for each number/text to change
 - If NO (text-only problem): Set "has_graph" to false and leave "replacements" as an empty array
+
+For replacements, you MUST provide exact coordinates as percentages (0-100) of where the text appears in the image:
+- x: horizontal position from LEFT edge (0 = left, 100 = right)
+- y: vertical position from TOP edge (0 = top, 100 = bottom)
+- width: width of text area as percentage (typically 3-8 for single digits)
+- height: height of text area as percentage (typically 3-6)
 
 Please respond in the following JSON format ONLY (no markdown, no code blocks, just pure JSON):
 {
@@ -1068,8 +999,8 @@ Please respond in the following JSON format ONLY (no markdown, no code blocks, j
     "solution": "Step-by-step solution in LaTeX format",
     "has_graph": true,
     "replacements": [
-        {"old_text": "2", "new_text": "3"},
-        {"old_text": "5", "new_text": "6"}
+        {"old_text": "2", "new_text": "3", "x": 75, "y": 85, "width": 4, "height": 4},
+        {"old_text": "5", "new_text": "6", "x": 20, "y": 30, "width": 3, "height": 4}
     ]
 }
 
@@ -1082,6 +1013,13 @@ For text-only problems (no graphs):
     "replacements": []
 }
 
+CRITICAL for coordinates:
+- Look carefully at WHERE each number appears in the image
+- x=0 is the LEFT edge, x=100 is the RIGHT edge
+- y=0 is the TOP edge, y=100 is the BOTTOM edge
+- For a number in the bottom-right area of the graph, x might be 70-90 and y might be 80-95
+- Be as precise as possible - the coordinates will be used to place white boxes over the old numbers
+
 Important:
 - Use LaTeX formatting for all mathematical expressions in question/answer/solution
 - The twin question should be solvable and have a clear answer
@@ -1089,7 +1027,6 @@ Important:
 - Keep the same difficulty level
 - ONLY provide replacements if the image contains graphs, diagrams, or figures
 - For text-only math problems, do NOT provide replacements
-- In replacements, only specify old_text and new_text (coordinates will be detected automatically via OCR)
 - Respond with valid JSON only, no additional text"""
 
         # Prepare the image for Gemini
