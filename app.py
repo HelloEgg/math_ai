@@ -835,27 +835,60 @@ def find_text_locations_ocr(img):
     Use OCR to find all text locations in an image.
     Returns a list of dicts with text, x, y, width, height.
     """
-    # Get OCR data with bounding boxes
-    ocr_data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
-
     text_locations = []
-    n_boxes = len(ocr_data['text'])
 
-    for i in range(n_boxes):
-        text = ocr_data['text'][i].strip()
-        conf = int(ocr_data['conf'][i])
+    # Try multiple OCR configurations for better detection
+    # PSM modes: 6 = uniform block of text, 11 = sparse text, 12 = sparse text with OSD
+    configs = [
+        '--psm 11',  # Sparse text - good for scattered numbers
+        '--psm 6',   # Uniform block of text
+        '--psm 12',  # Sparse text with OSD
+    ]
 
-        # Skip empty text or low confidence
-        if text and conf > 0:
-            text_locations.append({
-                'text': text,
-                'x': ocr_data['left'][i],
-                'y': ocr_data['top'][i],
-                'width': ocr_data['width'][i],
-                'height': ocr_data['height'][i],
-                'conf': conf
-            })
+    for config in configs:
+        try:
+            # Try with Korean + English if available
+            try:
+                ocr_data = pytesseract.image_to_data(
+                    img,
+                    output_type=pytesseract.Output.DICT,
+                    config=config,
+                    lang='kor+eng'
+                )
+            except:
+                # Fall back to English only
+                ocr_data = pytesseract.image_to_data(
+                    img,
+                    output_type=pytesseract.Output.DICT,
+                    config=config
+                )
 
+            n_boxes = len(ocr_data['text'])
+
+            for i in range(n_boxes):
+                text = ocr_data['text'][i].strip()
+                conf = int(ocr_data['conf'][i])
+
+                # Skip empty text, accept any confidence > -1
+                if text and conf > -1:
+                    loc = {
+                        'text': text,
+                        'x': ocr_data['left'][i],
+                        'y': ocr_data['top'][i],
+                        'width': ocr_data['width'][i],
+                        'height': ocr_data['height'][i],
+                        'conf': conf
+                    }
+                    # Avoid duplicates
+                    if not any(t['text'] == text and t['x'] == loc['x'] and t['y'] == loc['y']
+                               for t in text_locations):
+                        text_locations.append(loc)
+
+        except Exception as e:
+            print(f"OCR config {config} failed: {e}")
+            continue
+
+    print(f"OCR detected {len(text_locations)} text items: {[t['text'] for t in text_locations]}")
     return text_locations
 
 
@@ -896,11 +929,22 @@ def modify_image_with_replacements(image_data, replacements):
         if not old_text:
             continue
 
+        print(f"Looking for '{old_text}' to replace with '{new_text}'")
+
         # Find all matching text locations
         for loc in text_locations:
             # Check if this location matches and hasn't been replaced yet
             loc_key = (loc['x'], loc['y'])
-            if loc['text'] == old_text and loc_key not in replacements_made:
+            detected_text = loc['text']
+
+            # Flexible matching: exact match, contains, or OCR detected text contains old_text
+            is_match = (
+                detected_text == old_text or  # Exact match
+                old_text in detected_text or  # old_text is part of detected
+                detected_text in old_text     # detected is part of old_text
+            )
+
+            if is_match and loc_key not in replacements_made:
                 try:
                     x, y = loc['x'], loc['y']
                     width, height = loc['width'], loc['height']
