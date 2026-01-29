@@ -23,6 +23,9 @@ class Config:
     IMAGE_FOLDER_DEEP = os.path.join(UPLOAD_FOLDER, 'images_deep')
     AUDIO_FOLDER_DEEP = os.path.join(UPLOAD_FOLDER, 'audio_deep')
 
+    # File uploads - Math Twin
+    IMAGE_FOLDER_TWIN = os.path.join(UPLOAD_FOLDER, 'images_twin')
+
     # Allowed extensions
     ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
     ALLOWED_AUDIO_EXTENSIONS = {'mp3', 'wav', 'ogg', 'm4a', 'webm'}
