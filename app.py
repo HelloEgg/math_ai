@@ -831,9 +831,129 @@ def extract_json_from_response(response_text):
     return response_text
 
 
+def generate_question_image(api_key, latex_string, choices=None, graph_description=None, has_graph=False):
+    """
+    Generate a complete question image using Gemini's image generation model.
+
+    The image includes:
+    - Question text (latexString) at the top
+    - Graph/diagram in the middle (if has_graph and graph_description provided)
+    - Multiple choice options at the bottom (if choices provided)
+
+    Args:
+        api_key: Gemini API key
+        latex_string: The question text in LaTeX format (displayed at top)
+        choices: List of choice strings for MCQ (e.g., ["① 1", "② 2", ...])
+        graph_description: Detailed description of the graph to generate (optional)
+        has_graph: Whether the question has a graph/diagram
+
+    Returns:
+        Image data as bytes, or None if generation fails
+    """
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=api_key)
+
+        # Build the prompt based on what content we have
+        if has_graph and graph_description:
+            # Question with graph and possibly choices
+            choices_text = ""
+            if choices and len(choices) > 0:
+                choices_text = f"""
+
+아래쪽에 다음 선택지들을 표시하세요:
+{chr(10).join(choices)}"""
+
+            prompt = f"""수학 교과서용 깔끔하고 전문적인 문제 이미지를 생성하세요.
+
+이미지 구성:
+1. 상단: 다음 문제 텍스트를 표시하세요 (LaTeX 수식 포함):
+{latex_string}
+
+2. 중간: 다음 그래프/도형을 그리세요:
+{graph_description}
+{choices_text}
+
+스타일 요구사항:
+- 흰색 배경
+- 검은색 텍스트와 선
+- 명확한 축 레이블 (x, y)
+- 곡선 근처에 방정식 레이블
+- 지정된 경우 색칠된 영역
+- 깔끔하고 심플한 교과서 스타일
+- 수학적 정밀성
+- 추가 장식이나 색상 없음
+- 한국어 텍스트 사용"""
+
+        else:
+            # Text-only question (no graph)
+            if choices and len(choices) > 0:
+                # MCQ without graph
+                prompt = f"""수학 교과서용 깔끔하고 전문적인 문제 이미지를 생성하세요.
+
+이미지 구성:
+1. 상단: 다음 문제 텍스트를 표시하세요 (LaTeX 수식 포함):
+{latex_string}
+
+2. 하단: 다음 선택지들을 표시하세요:
+{chr(10).join(choices)}
+
+스타일 요구사항:
+- 흰색 배경
+- 검은색 텍스트
+- 명확하고 읽기 쉬운 글꼴
+- 깔끔하고 심플한 교과서 스타일
+- 수학적 정밀성
+- 추가 장식이나 색상 없음
+- 한국어 텍스트 사용
+- LaTeX 수식은 올바르게 렌더링"""
+            else:
+                # Text-only, no choices (short answer)
+                prompt = f"""수학 교과서용 깔끔하고 전문적인 문제 이미지를 생성하세요.
+
+이미지 구성:
+문제 텍스트를 표시하세요 (LaTeX 수식 포함):
+{latex_string}
+
+스타일 요구사항:
+- 흰색 배경
+- 검은색 텍스트
+- 명확하고 읽기 쉬운 글꼴
+- 깔끔하고 심플한 교과서 스타일
+- 수학적 정밀성
+- 추가 장식이나 색상 없음
+- 한국어 텍스트 사용
+- LaTeX 수식은 올바르게 렌더링"""
+
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-preview-image-generation",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_modalities=['Image']
+            )
+        )
+
+        # Extract image from response
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                image_data = part.inline_data.data
+                print(f"Generated question image: {len(image_data)} bytes")
+                return image_data
+
+        print("No image in Gemini response")
+        return None
+
+    except Exception as e:
+        print(f"Question image generation failed: {e}")
+        return None
+
+
 def generate_new_graph_image(api_key, graph_description):
     """
     Generate a new graph image using Gemini's image generation model.
+    (Legacy function - kept for backward compatibility)
 
     Args:
         api_key: Gemini API key
@@ -930,51 +1050,62 @@ def generate_math_twin():
         # Create the model for analysis
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # Create the prompt - now includes graph_description for image generation
-        prompt = """Analyze this math problem image and create a "twin" problem.
+        # Create the prompt - Korean version with choices support
+        prompt = """이 수학 문제 이미지를 분석하고 "쌍둥이" 문제를 생성하세요.
 
-A twin problem has the SAME structure and type of question, but with DIFFERENT numbers and/or variable names.
+쌍둥이 문제는 같은 구조와 유형의 문제이지만, 다른 숫자와/또는 변수명을 사용합니다.
 
-For example:
-- Original: "What is y when y = 2x and x = 3?"
-- Twin: "What is z when z = 5w and w = 4?"
+예시:
+- 원본: "y = 2x이고 x = 3일 때, y의 값은?"
+- 쌍둥이: "z = 5w이고 w = 4일 때, z의 값은?"
 
-IMPORTANT: First determine if the image contains any graphs, diagrams, figures, or geometric shapes.
-- If YES (contains graphs/diagrams/figures): Set has_graph to true and provide a detailed graph_description
-- If NO (text-only problem): Set has_graph to false and leave graph_description empty
+중요: 먼저 이미지에 그래프, 도형, 그림이 포함되어 있는지 확인하세요.
+또한 번호가 매겨진 보기가 있는 객관식 문제(MCQ)인지 확인하세요.
 
-Please respond in the following JSON format ONLY (no markdown, no code blocks, just pure JSON):
+다음 JSON 형식으로만 응답하세요 (마크다운 없이, 코드 블록 없이, 순수 JSON만):
 {
-    "question": "The twin math question in LaTeX format",
-    "answer": "The final answer in LaTeX format",
-    "solution": "Step-by-step solution in LaTeX format",
+    "question": "쌍둥이 수학 문제 (LaTeX 형식, 한국어로 작성)",
+    "answer": "최종 답 (LaTeX 형식)",
+    "solution": "단계별 풀이 (LaTeX 형식, 한국어로 작성)",
+    "is_mcq": true,
+    "choices": ["① 선택지1", "② 선택지2", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"],
     "has_graph": true,
-    "graph_description": "A detailed description of the NEW graph to generate. Include: 1) The coordinate system (x and y axes ranges), 2) All curves/functions to draw with their equations, 3) Any shaded regions, 4) All labels and their positions, 5) Any vertical/horizontal lines, 6) The intersection points if any. Be very specific so the graph can be accurately recreated."
+    "graph_description": "새 그래프에 대한 상세 설명. 포함사항: 1) 좌표계 (x, y축 범위), 2) 그릴 모든 곡선/함수와 방정식, 3) 색칠된 영역, 4) 모든 레이블과 위치, 5) 수직/수평선, 6) 교점. 구체적으로 작성하세요."
 }
 
-For text-only problems (no graphs):
+그래프가 없는 텍스트 전용 문제:
 {
-    "question": "The twin math question in LaTeX format",
-    "answer": "The final answer in LaTeX format",
-    "solution": "Step-by-step solution in LaTeX format",
+    "question": "쌍둥이 수학 문제 (LaTeX 형식, 한국어로 작성)",
+    "answer": "최종 답 (LaTeX 형식)",
+    "solution": "단계별 풀이 (LaTeX 형식, 한국어로 작성)",
+    "is_mcq": true,
+    "choices": ["① 선택지1", "② 선택지2", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"],
     "has_graph": false,
     "graph_description": ""
 }
 
-CRITICAL for graph_description:
-- Describe the TWIN problem's graph, not the original
-- Include specific equations like "y = x^2 + 4" and "y = -1/6 * x^2 + 4"
-- Specify axis ranges like "x-axis from -3 to 5, y-axis from -2 to 8"
-- Describe shaded regions like "shade the area between the two curves from x=0 to x=3"
-- Include all labels: axis labels, equation labels near curves, point labels
-- Mention any special features: vertical lines like "x = 3", intersection points, etc.
+객관식이 아닌 경우:
+{
+    "question": "쌍둥이 수학 문제 (LaTeX 형식, 한국어로 작성)",
+    "answer": "최종 답 (LaTeX 형식)",
+    "solution": "단계별 풀이 (LaTeX 형식, 한국어로 작성)",
+    "is_mcq": false,
+    "choices": [],
+    "has_graph": false,
+    "graph_description": ""
+}
 
-Important:
-- Use LaTeX formatting for all mathematical expressions in question/answer/solution
-- The twin question should be solvable and have a clear answer
-- Make sure numbers are different from the original
-- Keep the same difficulty level
-- Respond with valid JSON only, no additional text"""
+중요 지침:
+- 모든 내용(문제, 풀이, 선택지)은 반드시 한국어로 작성하세요
+- is_mcq는 선택할 수 있는 번호가 매겨진 보기가 있으면 true
+- choices는 객관식인 경우 모든 보기를 배열로 제공 (①②③④⑤ 기호 포함)
+- 객관식이 아니면 choices는 빈 배열 []
+- graph_description은 쌍둥이 문제의 새 그래프를 새 숫자로 설명
+- LaTeX 형식으로 모든 수학 표현식 작성
+- 풀 수 있는 문제로 만들고 명확한 답을 포함하세요
+- 원본과 다른 숫자를 사용하세요
+- 같은 난이도를 유지하세요
+- 유효한 JSON만 응답하세요, 추가 텍스트 없이"""
 
         # Prepare the image for Gemini
         image_part = {
@@ -998,39 +1129,46 @@ Important:
                 'raw_response': response.text
             }), 500
 
-        # Generate new graph image if has_graph is true and graph_description is provided
-        generated_image_uuid = None
+        # Extract question data
+        latex_string = result.get('question', '')
+        choices = result.get('choices', [])
         has_graph = result.get('has_graph', False)
         graph_description = result.get('graph_description', '')
+        is_mcq = result.get('is_mcq', False)
 
-        if has_graph and graph_description:
-            try:
-                print(f"Generating new graph with description: {graph_description[:200]}...")
+        # Always generate a question image with latexString on top, graph in middle (if any), and choices at bottom (if MCQ)
+        generated_image_uuid = None
+        try:
+            print(f"Generating question image (has_graph={has_graph}, is_mcq={is_mcq}, choices={len(choices)})...")
 
-                # Generate new graph image using Gemini
-                generated_image_data = generate_new_graph_image(
-                    app.config['GEMINI_API_KEY'],
-                    graph_description
-                )
+            generated_image_data = generate_question_image(
+                api_key=app.config['GEMINI_API_KEY'],
+                latex_string=latex_string,
+                choices=choices if is_mcq else None,
+                graph_description=graph_description if has_graph else None,
+                has_graph=has_graph
+            )
 
-                if generated_image_data:
-                    # Save generated image to disk
-                    generated_image_uuid = str(uuid.uuid4())
-                    image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
-                    with open(image_path, 'wb') as f:
-                        f.write(generated_image_data)
-                    print(f"Saved generated image: {generated_image_uuid}")
-                else:
-                    print("Image generation returned no data")
+            if generated_image_data:
+                # Save generated image to disk
+                generated_image_uuid = str(uuid.uuid4())
+                image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
+                with open(image_path, 'wb') as f:
+                    f.write(generated_image_data)
+                print(f"Saved generated question image: {generated_image_uuid}")
+            else:
+                print("Question image generation returned no data")
 
-            except Exception as e:
-                # If image generation fails, continue without it
-                print(f"Warning: Image generation failed: {e}")
+        except Exception as e:
+            # If image generation fails, continue without it
+            print(f"Warning: Question image generation failed: {e}")
 
         response_data = {
-            'question': result['question'],
+            'question': latex_string,
             'answer': result['answer'],
             'solution': result['solution'],
+            'is_mcq': is_mcq,
+            'choices': choices,
             'has_graph': has_graph,
             'graph_description': graph_description if has_graph else None,
             'modified_image_id': generated_image_uuid,
@@ -1080,38 +1218,54 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        prompt = """Analyze this math problem image and create a "twin" problem.
+        prompt = """이 수학 문제 이미지를 분석하고 "쌍둥이" 문제를 생성하세요.
 
-A twin problem has the SAME structure and type of question, but with DIFFERENT numbers and/or variable names.
+쌍둥이 문제는 같은 구조와 유형의 문제이지만, 다른 숫자와/또는 변수명을 사용합니다.
 
-IMPORTANT: First determine if the image contains any graphs, diagrams, figures, or geometric shapes.
-Also determine if this is a multiple choice question (MCQ) with numbered options.
+중요: 먼저 이미지에 그래프, 도형, 그림이 포함되어 있는지 확인하세요.
+또한 번호가 매겨진 보기가 있는 객관식 문제(MCQ)인지 확인하세요.
 
-Please respond in the following JSON format ONLY (no markdown, no code blocks, just pure JSON):
+다음 JSON 형식으로만 응답하세요 (마크다운 없이, 코드 블록 없이, 순수 JSON만):
 {
-    "question": "The twin math question in LaTeX format (full question text)",
+    "question": "쌍둥이 수학 문제 (LaTeX 형식, 전체 문제 텍스트, 한국어로 작성)",
     "answer_number": 1,
-    "solution": "Step-by-step solution/explanation in LaTeX format",
+    "solution": "단계별 풀이/설명 (LaTeX 형식, 한국어로 작성)",
     "is_mcq": true,
+    "choices": ["① 선택지1", "② 선택지2", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"],
     "has_graph": true,
-    "graph_description": "A detailed description of the NEW graph to generate. Include: 1) The coordinate system (x and y axes ranges), 2) All curves/functions to draw with their equations, 3) Any shaded regions, 4) All labels and their positions, 5) Any vertical/horizontal lines. Be very specific."
+    "graph_description": "새 그래프에 대한 상세 설명. 포함사항: 1) 좌표계 (x, y축 범위), 2) 그릴 모든 곡선/함수와 방정식, 3) 색칠된 영역, 4) 모든 레이블과 위치, 5) 수직/수평선. 구체적으로 작성하세요."
 }
 
-For text-only problems (no graphs):
+그래프가 없는 텍스트 전용 문제:
 {
-    "question": "The twin math question in LaTeX format",
+    "question": "쌍둥이 수학 문제 (LaTeX 형식, 한국어로 작성)",
     "answer_number": 3,
-    "solution": "Step-by-step solution in LaTeX format",
+    "solution": "단계별 풀이 (LaTeX 형식, 한국어로 작성)",
     "is_mcq": true,
+    "choices": ["① 선택지1", "② 선택지2", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"],
     "has_graph": false,
     "graph_description": ""
 }
 
-CRITICAL:
-- answer_number should be the correct option number (1, 2, 3, 4, or 5) for MCQ questions
-- is_mcq should be true if the question has numbered options to choose from
-- For graph_description, describe the TWIN problem's graph with new numbers
-- Respond with valid JSON only, no additional text"""
+객관식이 아닌 경우:
+{
+    "question": "쌍둥이 수학 문제 (LaTeX 형식, 한국어로 작성)",
+    "answer_number": 0,
+    "solution": "단계별 풀이 (LaTeX 형식, 한국어로 작성)",
+    "is_mcq": false,
+    "choices": [],
+    "has_graph": false,
+    "graph_description": ""
+}
+
+중요 지침:
+- 모든 내용(문제, 풀이, 선택지)은 반드시 한국어로 작성하세요
+- answer_number는 객관식 문제의 정답 번호(1, 2, 3, 4, 또는 5)
+- is_mcq는 선택할 수 있는 번호가 매겨진 보기가 있으면 true
+- choices는 객관식인 경우 모든 보기를 배열로 제공 (①②③④⑤ 기호 포함)
+- 객관식이 아니면 choices는 빈 배열 []
+- graph_description은 쌍둥이 문제의 새 그래프를 새 숫자로 설명
+- 유효한 JSON만 응답하세요, 추가 텍스트 없이"""
 
         image_part = {
             "mime_type": mime_type,
@@ -1122,23 +1276,45 @@ CRITICAL:
         response_text = extract_json_from_response(response.text)
         result = json.loads(response_text)
 
-        # Generate new graph image if needed
+        # Extract question data
+        latex_string = result.get('question', '')
+        choices = result.get('choices', [])
+        has_graph = result.get('has_graph', False)
+        graph_description = result.get('graph_description', '')
+        is_mcq = result.get('is_mcq', True)
+
+        # Always generate a question image with latexString on top, graph in middle (if any), and choices at bottom (if MCQ)
         generated_image_url = None
-        if result.get('has_graph') and result.get('graph_description'):
-            generated_image_data = generate_new_graph_image(api_key, result['graph_description'])
+        try:
+            print(f"Generating question image (has_graph={has_graph}, is_mcq={is_mcq}, choices={len(choices)})...")
+
+            generated_image_data = generate_question_image(
+                api_key=api_key,
+                latex_string=latex_string,
+                choices=choices if is_mcq else None,
+                graph_description=graph_description if has_graph else None,
+                has_graph=has_graph
+            )
+
             if generated_image_data:
                 generated_image_uuid = str(uuid.uuid4())
                 image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
                 with open(image_path, 'wb') as f:
                     f.write(generated_image_data)
                 generated_image_url = f"{base_url}/math_twin/images/{generated_image_uuid}"
+                print(f"Saved question image: {generated_image_uuid}")
+            else:
+                print("Question image generation returned no data")
+        except Exception as e:
+            print(f"Warning: Question image generation failed: {e}")
 
         return {
-            "latexString": result.get('question', ''),
+            "latexString": latex_string,
             "answerString": result.get('solution', ''),
             "originalImageURL": original_url,
             "questionImageUrl": generated_image_url,
-            "isMCQ": result.get('is_mcq', True),
+            "isMCQ": is_mcq,
+            "choices": choices,
             "answer": result.get('answer_number', 1)
         }
 
