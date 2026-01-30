@@ -5,6 +5,7 @@ import base64
 import io
 import uuid
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
@@ -1149,12 +1150,13 @@ CRITICAL:
 @app.route('/math_twin/batch', methods=['POST'])
 def generate_math_twin_batch():
     """
-    Generate multiple twin questions from a list of image URLs.
+    Generate multiple twin questions from a list of image URLs in parallel.
 
     Expects JSON body:
     {
         "questions": ["https://example.com/img1.png", "https://example.com/img2.png"],
-        "num_questions": 4
+        "num_questions": 4,
+        "max_workers": 10  // optional, default 10
     }
 
     Returns: List of generated twin questions
@@ -1170,6 +1172,7 @@ def generate_math_twin_batch():
 
     questions = data.get('questions', [])
     num_questions = data.get('num_questions', 1)
+    max_workers = data.get('max_workers', 10)  # Default 10 parallel workers
 
     if not questions:
         return jsonify({'error': 'No questions (image URLs) provided'}), 400
@@ -1182,34 +1185,55 @@ def generate_math_twin_batch():
 
     # Get base URL for generated images
     base_url = request.host_url.rstrip('/')
+    api_key = app.config['GEMINI_API_KEY']
 
+    # First, download all images in parallel
+    print(f"Downloading {len(questions)} images...")
+    image_data_map = {}
+
+    def download_task(url):
+        return url, download_image_from_url(url)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        download_futures = {executor.submit(download_task, url): url for url in questions}
+        for future in as_completed(download_futures):
+            url, image_data = future.result()
+            if image_data:
+                image_data_map[url] = image_data
+                print(f"  Downloaded: {url}")
+            else:
+                print(f"  Failed to download: {url}")
+
+    # Prepare all tasks for twin generation
+    tasks = []
+    for image_url, image_data in image_data_map.items():
+        for i in range(num_questions):
+            tasks.append((image_url, image_data, i))
+
+    print(f"Generating {len(tasks)} twins in parallel (max_workers={max_workers})...")
+
+    # Generate all twins in parallel
     results = []
 
-    for image_url in questions:
-        print(f"Processing image: {image_url}")
+    def generate_task(task_info):
+        image_url, image_data, task_index = task_info
+        print(f"  Generating twin {task_index+1} for {image_url}")
+        return generate_single_twin(api_key, image_data, image_url, base_url)
 
-        # Download image from URL
-        image_data = download_image_from_url(image_url)
-        if not image_data:
-            print(f"Failed to download: {image_url}")
-            continue
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(generate_task, task): task for task in tasks}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+                else:
+                    task = futures[future]
+                    print(f"  Failed to generate twin for {task[0]}")
+            except Exception as e:
+                print(f"  Error in parallel task: {e}")
 
-        # Generate num_questions twins for this image
-        for i in range(num_questions):
-            print(f"  Generating twin {i+1}/{num_questions} for {image_url}")
-
-            twin_result = generate_single_twin(
-                app.config['GEMINI_API_KEY'],
-                image_data,
-                image_url,
-                base_url
-            )
-
-            if twin_result:
-                results.append(twin_result)
-            else:
-                print(f"  Failed to generate twin {i+1}")
-
+    print(f"Generated {len(results)} twins successfully")
     return jsonify(results)
 
 
