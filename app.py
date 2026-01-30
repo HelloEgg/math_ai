@@ -4,6 +4,8 @@ import json
 import base64
 import io
 import uuid
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
@@ -1048,6 +1050,191 @@ Important:
             'error': 'Failed to generate twin question',
             'details': str(e)
         }), 500
+
+
+def download_image_from_url(url):
+    """
+    Download image from URL and return image data as bytes.
+    """
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        return response.content
+    except Exception as e:
+        print(f"Failed to download image from {url}: {e}")
+        return None
+
+
+def generate_single_twin(api_key, image_data, original_url, base_url):
+    """
+    Generate a single twin question from image data.
+    Returns formatted response dict or None if failed.
+    """
+    try:
+        # Determine mime type from image data
+        img = Image.open(io.BytesIO(image_data))
+        mime_type = f"image/{img.format.lower()}" if img.format else "image/png"
+        if mime_type == "image/jpeg":
+            mime_type = "image/jpeg"
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.0-flash')
+
+        prompt = """Analyze this math problem image and create a "twin" problem.
+
+A twin problem has the SAME structure and type of question, but with DIFFERENT numbers and/or variable names.
+
+IMPORTANT: First determine if the image contains any graphs, diagrams, figures, or geometric shapes.
+Also determine if this is a multiple choice question (MCQ) with numbered options.
+
+Please respond in the following JSON format ONLY (no markdown, no code blocks, just pure JSON):
+{
+    "question": "The twin math question in LaTeX format (full question text)",
+    "answer_number": 1,
+    "solution": "Step-by-step solution/explanation in LaTeX format",
+    "is_mcq": true,
+    "has_graph": true,
+    "graph_description": "A detailed description of the NEW graph to generate. Include: 1) The coordinate system (x and y axes ranges), 2) All curves/functions to draw with their equations, 3) Any shaded regions, 4) All labels and their positions, 5) Any vertical/horizontal lines. Be very specific."
+}
+
+For text-only problems (no graphs):
+{
+    "question": "The twin math question in LaTeX format",
+    "answer_number": 3,
+    "solution": "Step-by-step solution in LaTeX format",
+    "is_mcq": true,
+    "has_graph": false,
+    "graph_description": ""
+}
+
+CRITICAL:
+- answer_number should be the correct option number (1, 2, 3, 4, or 5) for MCQ questions
+- is_mcq should be true if the question has numbered options to choose from
+- For graph_description, describe the TWIN problem's graph with new numbers
+- Respond with valid JSON only, no additional text"""
+
+        image_part = {
+            "mime_type": mime_type,
+            "data": base64.b64encode(image_data).decode('utf-8')
+        }
+
+        response = model.generate_content([prompt, image_part])
+        response_text = extract_json_from_response(response.text)
+        result = json.loads(response_text)
+
+        # Generate new graph image if needed
+        generated_image_url = None
+        if result.get('has_graph') and result.get('graph_description'):
+            generated_image_data = generate_new_graph_image(api_key, result['graph_description'])
+            if generated_image_data:
+                generated_image_uuid = str(uuid.uuid4())
+                image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
+                with open(image_path, 'wb') as f:
+                    f.write(generated_image_data)
+                generated_image_url = f"{base_url}/math_twin/images/{generated_image_uuid}"
+
+        return {
+            "latexString": result.get('question', ''),
+            "answerString": result.get('solution', ''),
+            "originalImageURL": original_url,
+            "questionImageUrl": generated_image_url,
+            "isMCQ": result.get('is_mcq', True),
+            "answer": result.get('answer_number', 1)
+        }
+
+    except Exception as e:
+        print(f"Error generating twin: {e}")
+        return None
+
+
+@app.route('/math_twin/batch', methods=['POST'])
+def generate_math_twin_batch():
+    """
+    Generate multiple twin questions from a list of image URLs in parallel.
+
+    Expects JSON body:
+    {
+        "questions": ["https://example.com/img1.png", "https://example.com/img2.png"],
+        "num_questions": 4,
+        "max_workers": 10  // optional, default 10
+    }
+
+    Returns: List of generated twin questions
+    """
+    # Check if Gemini API key is configured
+    if not app.config.get('GEMINI_API_KEY'):
+        return jsonify({'error': 'Gemini API key not configured'}), 500
+
+    # Parse JSON body
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+
+    questions = data.get('questions', [])
+    num_questions = data.get('num_questions', 1)
+    max_workers = data.get('max_workers', 10)  # Default 10 parallel workers
+
+    if not questions:
+        return jsonify({'error': 'No questions (image URLs) provided'}), 400
+
+    if not isinstance(questions, list):
+        return jsonify({'error': 'questions must be a list of URLs'}), 400
+
+    if not isinstance(num_questions, int) or num_questions < 1:
+        return jsonify({'error': 'num_questions must be a positive integer'}), 400
+
+    # Get base URL for generated images
+    base_url = request.host_url.rstrip('/')
+    api_key = app.config['GEMINI_API_KEY']
+
+    # First, download all images in parallel
+    print(f"Downloading {len(questions)} images...")
+    image_data_map = {}
+
+    def download_task(url):
+        return url, download_image_from_url(url)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        download_futures = {executor.submit(download_task, url): url for url in questions}
+        for future in as_completed(download_futures):
+            url, image_data = future.result()
+            if image_data:
+                image_data_map[url] = image_data
+                print(f"  Downloaded: {url}")
+            else:
+                print(f"  Failed to download: {url}")
+
+    # Prepare all tasks for twin generation
+    tasks = []
+    for image_url, image_data in image_data_map.items():
+        for i in range(num_questions):
+            tasks.append((image_url, image_data, i))
+
+    print(f"Generating {len(tasks)} twins in parallel (max_workers={max_workers})...")
+
+    # Generate all twins in parallel
+    results = []
+
+    def generate_task(task_info):
+        image_url, image_data, task_index = task_info
+        print(f"  Generating twin {task_index+1} for {image_url}")
+        return generate_single_twin(api_key, image_data, image_url, base_url)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(generate_task, task): task for task in tasks}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+                else:
+                    task = futures[future]
+                    print(f"  Failed to generate twin for {task[0]}")
+            except Exception as e:
+                print(f"  Error in parallel task: {e}")
+
+    print(f"Generated {len(results)} twins successfully")
+    return jsonify(results)
 
 
 if __name__ == '__main__':
