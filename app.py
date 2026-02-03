@@ -1590,6 +1590,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
             "answerString": result.get('solution', ''),
             "originalImageURL": original_url,
             "questionImageUrl": generated_image_url,
+            "answerImageUrl": generated_image_url,  # Full question image (same as questionImageUrl)
             "isMCQ": is_mcq,
             "choices": choices,
             "answer": result.get('answer_number', 1)
