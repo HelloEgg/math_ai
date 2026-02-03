@@ -4,7 +4,9 @@ import json
 import base64
 import io
 import uuid
+import re
 import requests
+from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
@@ -66,6 +68,141 @@ def compute_image_hash(file_data):
     return hashlib.sha256(file_data).hexdigest()
 
 
+def extract_latex_from_image(image_data, api_key):
+    """
+    Extract math problem text as LaTeX from an image using Gemini Vision API.
+
+    Args:
+        image_data: Image data as bytes
+        api_key: Gemini API key
+
+    Returns:
+        Extracted LaTeX string, or None if extraction fails
+    """
+    try:
+        # Determine mime type from image data
+        img = Image.open(io.BytesIO(image_data))
+        mime_type = f"image/{img.format.lower()}" if img.format else "image/png"
+        if mime_type == "image/jpeg":
+            mime_type = "image/jpeg"
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.0-flash')
+
+        prompt = """Extract ALL text and mathematical content from this math problem image.
+
+Output the complete problem text in a normalized format:
+1. Convert all mathematical expressions to LaTeX format
+2. Include ALL text, numbers, equations, and choices if present
+3. Preserve the problem structure (question text, equations, choices)
+4. Remove any formatting that doesn't affect mathematical meaning
+
+Output ONLY the extracted text/LaTeX, nothing else. No explanations or comments.
+If there are multiple choice options, include them with their labels (①②③④⑤ or 1,2,3,4,5 etc.)"""
+
+        image_part = {
+            "mime_type": mime_type,
+            "data": base64.b64encode(image_data).decode('utf-8')
+        }
+
+        response = model.generate_content([prompt, image_part])
+        latex_string = response.text.strip()
+
+        print(f"OCR extracted: {latex_string[:200]}..." if len(latex_string) > 200 else f"OCR extracted: {latex_string}")
+        return latex_string
+
+    except Exception as e:
+        print(f"OCR extraction failed: {e}")
+        return None
+
+
+def normalize_latex(latex_string):
+    """
+    Normalize a LaTeX string for comparison.
+    Removes whitespace variations, normalizes common LaTeX patterns.
+
+    Args:
+        latex_string: LaTeX string to normalize
+
+    Returns:
+        Normalized string
+    """
+    if not latex_string:
+        return ""
+
+    # Convert to lowercase for comparison
+    s = latex_string.lower()
+
+    # Remove all whitespace
+    s = re.sub(r'\s+', '', s)
+
+    # Normalize common LaTeX variations
+    s = s.replace('\\left(', '(').replace('\\right)', ')')
+    s = s.replace('\\left[', '[').replace('\\right]', ']')
+    s = s.replace('\\left{', '{').replace('\\right}', '}')
+    s = s.replace('\\cdot', '*').replace('\\times', '*')
+    s = s.replace('\\div', '/')
+
+    # Remove common LaTeX commands that don't affect meaning
+    s = re.sub(r'\\(displaystyle|textstyle|scriptstyle|scriptscriptstyle)', '', s)
+    s = re.sub(r'\\(text|mathrm|mathbf|mathit|mathsf|mathtt|mathcal)\{([^}]*)\}', r'\2', s)
+
+    return s
+
+
+def calculate_latex_similarity(latex1, latex2):
+    """
+    Calculate similarity ratio between two LaTeX strings.
+
+    Args:
+        latex1: First LaTeX string
+        latex2: Second LaTeX string
+
+    Returns:
+        Similarity ratio between 0 and 1
+    """
+    norm1 = normalize_latex(latex1)
+    norm2 = normalize_latex(latex2)
+
+    if not norm1 or not norm2:
+        return 0.0
+
+    return SequenceMatcher(None, norm1, norm2).ratio()
+
+
+def find_similar_problem(latex_string, model_class, similarity_threshold=0.85):
+    """
+    Find a problem with similar LaTeX content in the database.
+
+    Args:
+        latex_string: The LaTeX string to search for
+        model_class: The database model class to search (MathProblem, MathProblemSummary, MathProblemDeep)
+        similarity_threshold: Minimum similarity ratio to consider a match (default 0.85)
+
+    Returns:
+        The matching problem record, or None if no match found
+    """
+    if not latex_string:
+        return None
+
+    # Get all problems with latex_string
+    problems = model_class.query.filter(model_class.latex_string.isnot(None)).all()
+
+    best_match = None
+    best_similarity = 0.0
+
+    for problem in problems:
+        similarity = calculate_latex_similarity(latex_string, problem.latex_string)
+        if similarity > best_similarity and similarity >= similarity_threshold:
+            best_similarity = similarity
+            best_match = problem
+
+    if best_match:
+        print(f"Found similar problem with {best_similarity:.2%} similarity: {best_match.id}")
+
+    return best_match
+
+
 def save_file(file, folder, prefix):
     """Save uploaded file and return the path."""
     filename = secure_filename(file.filename)
@@ -90,10 +227,10 @@ def health_check():
 @app.route('/search', methods=['POST'])
 def search_problem():
     """
-    Search for a math problem by image.
+    Search for a math problem by image using OCR-based content matching.
 
     Expects: multipart/form-data with 'image' file
-    Returns: JSON with 'uuid' (string or null)
+    Returns: JSON with 'uuid' (string or null), 'match_type' ('exact', 'similar', or null), 'similarity' (0-1)
     """
     # Validate request has image
     if 'image' not in request.files:
@@ -115,13 +252,37 @@ def search_problem():
 
     image_hash = compute_image_hash(image_data)
 
-    # Search for existing problem with same image hash
+    # Step 1: Try exact image hash match first (fastest)
     problem = MathProblem.query.filter_by(image_hash=image_hash).first()
 
     if problem:
-        return jsonify({'uuid': problem.id})
-    else:
-        return jsonify({'uuid': None})
+        return jsonify({
+            'uuid': problem.id,
+            'match_type': 'exact',
+            'similarity': 1.0
+        })
+
+    # Step 2: Extract LaTeX from image using OCR and find similar problems
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+
+        if latex_string:
+            # Find similar problem using fuzzy matching
+            similar_problem = find_similar_problem(latex_string, MathProblem, similarity_threshold=0.85)
+
+            if similar_problem:
+                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                return jsonify({
+                    'uuid': similar_problem.id,
+                    'match_type': 'similar',
+                    'similarity': round(similarity, 4)
+                })
+
+    return jsonify({
+        'uuid': None,
+        'match_type': None,
+        'similarity': 0.0
+    })
 
 
 @app.route('/problems', methods=['POST'])
@@ -184,6 +345,11 @@ def create_problem():
             'existing_uuid': existing.id
         }), 409
 
+    # Extract LaTeX from image using OCR (for content-based search)
+    latex_string = None
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+
     # Read audio data to check size
     audio_data = audio_file.read()
     if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
@@ -193,6 +359,7 @@ def create_problem():
     problem = MathProblem(
         image_hash=image_hash,
         solution_latex=solution_latex,
+        latex_string=latex_string,  # OCR extracted question text
         image_path='',  # Will be updated after saving
         audio_path=''   # Will be updated after saving
     )
@@ -215,6 +382,7 @@ def create_problem():
 
     return jsonify({
         'uuid': problem.id,
+        'latex_string': latex_string,
         'message': 'Math problem created successfully'
     }), 201
 
@@ -340,7 +508,12 @@ def delete_problem(uuid):
 
 @app.route('/search_summary', methods=['POST'])
 def search_problem_summary():
-    """Search for a math problem summary by image."""
+    """
+    Search for a math problem summary by image using OCR-based content matching.
+
+    Expects: multipart/form-data with 'image' file
+    Returns: JSON with 'uuid' (string or null), 'match_type' ('exact', 'similar', or null), 'similarity' (0-1)
+    """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
 
@@ -358,12 +531,38 @@ def search_problem_summary():
         return jsonify({'error': 'Image file too large'}), 400
 
     image_hash = compute_image_hash(image_data)
+
+    # Step 1: Try exact image hash match first (fastest)
     problem = MathProblemSummary.query.filter_by(image_hash=image_hash).first()
 
     if problem:
-        return jsonify({'uuid': problem.id})
-    else:
-        return jsonify({'uuid': None})
+        return jsonify({
+            'uuid': problem.id,
+            'match_type': 'exact',
+            'similarity': 1.0
+        })
+
+    # Step 2: Extract LaTeX from image using OCR and find similar problems
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+
+        if latex_string:
+            # Find similar problem using fuzzy matching
+            similar_problem = find_similar_problem(latex_string, MathProblemSummary, similarity_threshold=0.85)
+
+            if similar_problem:
+                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                return jsonify({
+                    'uuid': similar_problem.id,
+                    'match_type': 'similar',
+                    'similarity': round(similarity, 4)
+                })
+
+    return jsonify({
+        'uuid': None,
+        'match_type': None,
+        'similarity': 0.0
+    })
 
 
 @app.route('/problems_summary', methods=['POST'])
@@ -411,6 +610,11 @@ def create_problem_summary():
             'existing_uuid': existing.id
         }), 409
 
+    # Extract LaTeX from image using OCR (for content-based search)
+    latex_string = None
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+
     audio_data = audio_file.read()
     if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
         return jsonify({'error': 'Audio file too large'}), 400
@@ -418,6 +622,7 @@ def create_problem_summary():
     problem = MathProblemSummary(
         image_hash=image_hash,
         solution_latex=solution_latex,
+        latex_string=latex_string,  # OCR extracted question text
         image_path='',
         audio_path=''
     )
@@ -437,6 +642,7 @@ def create_problem_summary():
 
     return jsonify({
         'uuid': problem.id,
+        'latex_string': latex_string,
         'message': 'Math problem summary created successfully'
     }), 201
 
@@ -536,7 +742,12 @@ def delete_problem_summary(uuid):
 
 @app.route('/search_deep', methods=['POST'])
 def search_problem_deep():
-    """Search for a deep math problem by image."""
+    """
+    Search for a deep math problem by image using OCR-based content matching.
+
+    Expects: multipart/form-data with 'image' file
+    Returns: JSON with 'uuid' (string or null), 'match_type' ('exact', 'similar', or null), 'similarity' (0-1)
+    """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
 
@@ -554,12 +765,38 @@ def search_problem_deep():
         return jsonify({'error': 'Image file too large'}), 400
 
     image_hash = compute_image_hash(image_data)
+
+    # Step 1: Try exact image hash match first (fastest)
     problem = MathProblemDeep.query.filter_by(image_hash=image_hash).first()
 
     if problem:
-        return jsonify({'uuid': problem.id})
-    else:
-        return jsonify({'uuid': None})
+        return jsonify({
+            'uuid': problem.id,
+            'match_type': 'exact',
+            'similarity': 1.0
+        })
+
+    # Step 2: Extract LaTeX from image using OCR and find similar problems
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+
+        if latex_string:
+            # Find similar problem using fuzzy matching
+            similar_problem = find_similar_problem(latex_string, MathProblemDeep, similarity_threshold=0.85)
+
+            if similar_problem:
+                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                return jsonify({
+                    'uuid': similar_problem.id,
+                    'match_type': 'similar',
+                    'similarity': round(similarity, 4)
+                })
+
+    return jsonify({
+        'uuid': None,
+        'match_type': None,
+        'similarity': 0.0
+    })
 
 
 @app.route('/problems_deep', methods=['POST'])
@@ -607,6 +844,11 @@ def create_problem_deep():
             'existing_uuid': existing.id
         }), 409
 
+    # Extract LaTeX from image using OCR (for content-based search)
+    latex_string = None
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+
     audio_data = audio_file.read()
     if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
         return jsonify({'error': 'Audio file too large'}), 400
@@ -614,6 +856,7 @@ def create_problem_deep():
     problem = MathProblemDeep(
         image_hash=image_hash,
         solution_latex=solution_latex,
+        latex_string=latex_string,  # OCR extracted question text
         image_path='',
         audio_path=''
     )
@@ -633,6 +876,7 @@ def create_problem_deep():
 
     return jsonify({
         'uuid': problem.id,
+        'latex_string': latex_string,
         'message': 'Deep math problem created successfully'
     }), 201
 
