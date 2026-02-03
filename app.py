@@ -51,7 +51,40 @@ def create_app(config_class=Config):
     with app.app_context():
         db.create_all()
 
+        # Migrate existing tables to add latex_string column if it doesn't exist
+        migrate_add_latex_string_column(app)
+
     return app
+
+
+def migrate_add_latex_string_column(app):
+    """
+    Add latex_string column to existing tables if it doesn't exist.
+    This handles migration for existing databases.
+    """
+    from sqlalchemy import text, inspect
+
+    with app.app_context():
+        inspector = inspect(db.engine)
+
+        tables_to_migrate = ['math_problems', 'math_problems_summary', 'math_problems_deep']
+
+        for table_name in tables_to_migrate:
+            # Check if table exists
+            if table_name not in inspector.get_table_names():
+                continue
+
+            # Check if column already exists
+            columns = [col['name'] for col in inspector.get_columns(table_name)]
+            if 'latex_string' not in columns:
+                print(f"Migrating {table_name}: adding latex_string column...")
+                try:
+                    db.session.execute(text(f'ALTER TABLE {table_name} ADD COLUMN latex_string TEXT'))
+                    db.session.commit()
+                    print(f"  Successfully added latex_string column to {table_name}")
+                except Exception as e:
+                    db.session.rollback()
+                    print(f"  Warning: Could not add latex_string column to {table_name}: {e}")
 
 
 app = create_app()
