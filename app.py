@@ -1205,7 +1205,7 @@ def generate_question_image(api_key, latex_string, choices=None, graph_descripti
 - LaTeX 수식은 올바르게 렌더링"""
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash-preview-image-generation",
+            model="gemini-3-pro-image-preview",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_modalities=['Image']
@@ -1260,7 +1260,7 @@ Style requirements:
 - No extra decorations or colors"""
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash-preview-image-generation",
+            model="gemini-3-pro-image-preview",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_modalities=['Image']
