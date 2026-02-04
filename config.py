@@ -23,6 +23,9 @@ class Config:
     IMAGE_FOLDER_DEEP = os.path.join(UPLOAD_FOLDER, 'images_deep')
     AUDIO_FOLDER_DEEP = os.path.join(UPLOAD_FOLDER, 'audio_deep')
 
+    # File uploads - Original
+    IMAGE_FOLDER_ORIGINAL = os.path.join(UPLOAD_FOLDER, 'images_original')
+
     # File uploads - Math Twin
     IMAGE_FOLDER_TWIN = os.path.join(UPLOAD_FOLDER, 'images_twin')
 
