@@ -61,7 +61,7 @@ def create_app(config_class=Config):
 
 def migrate_add_latex_string_column(app):
     """
-    Add latex_string column to existing tables if it doesn't exist.
+    Add missing columns to existing tables.
     This handles migration for existing databases.
     """
     from sqlalchemy import text, inspect
@@ -69,14 +69,11 @@ def migrate_add_latex_string_column(app):
     with app.app_context():
         inspector = inspect(db.engine)
 
-        tables_to_migrate = ['math_problems', 'math_problems_summary', 'math_problems_deep', 'math_problems_original']
-
-        for table_name in tables_to_migrate:
-            # Check if table exists
+        # latex_string column for all tables
+        tables_for_latex = ['math_problems', 'math_problems_summary', 'math_problems_deep', 'math_problems_original']
+        for table_name in tables_for_latex:
             if table_name not in inspector.get_table_names():
                 continue
-
-            # Check if column already exists
             columns = [col['name'] for col in inspector.get_columns(table_name)]
             if 'latex_string' not in columns:
                 print(f"Migrating {table_name}: adding latex_string column...")
@@ -87,6 +84,26 @@ def migrate_add_latex_string_column(app):
                 except Exception as e:
                     db.session.rollback()
                     print(f"  Warning: Could not add latex_string column to {table_name}: {e}")
+
+        # Additional columns for math_problems_original
+        if 'math_problems_original' in inspector.get_table_names():
+            columns = [col['name'] for col in inspector.get_columns('math_problems_original')]
+
+            migrations = {
+                'image_url': 'ALTER TABLE math_problems_original ADD COLUMN image_url VARCHAR(2048)',
+                'answer': 'ALTER TABLE math_problems_original ADD COLUMN answer TEXT',
+            }
+
+            for col_name, sql in migrations.items():
+                if col_name not in columns:
+                    print(f"Migrating math_problems_original: adding {col_name} column...")
+                    try:
+                        db.session.execute(text(sql))
+                        db.session.commit()
+                        print(f"  Successfully added {col_name} column")
+                    except Exception as e:
+                        db.session.rollback()
+                        print(f"  Warning: Could not add {col_name} column: {e}")
 
 
 app = create_app()
@@ -538,32 +555,37 @@ def delete_problem(uuid):
 
 
 # =============================================================================
-# Original Endpoints (no audio)
+# Original Endpoints (JSON with image URLs, no audio)
 # =============================================================================
 
 @app.route('/search_original', methods=['POST'])
 def search_problem_original():
     """
-    Search for an original math problem by image using OCR-based content matching.
+    Search for an original math problem by image URL.
+    Downloads the image, then searches DB by hash and OCR-based fuzzy matching.
+    If found, returns the stored solution and answer.
 
-    Expects: multipart/form-data with 'image' file
-    Returns: JSON with 'uuid' (string or null), 'match_type' ('exact', 'similar', or null), 'similarity' (0-1)
+    Expects JSON body:
+    {
+        "image_url": "https://example.com/problem.png"
+    }
+
+    Returns:
+        - If found: uuid, solution_latex, answer, image_url, match_type, similarity
+        - If not found: uuid=null
     """
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image file provided'}), 400
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
 
-    image_file = request.files['image']
+    image_url = data.get('image_url')
+    if not image_url:
+        return jsonify({'error': 'No image_url provided'}), 400
 
-    if image_file.filename == '':
-        return jsonify({'error': 'No image file selected'}), 400
-
-    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
-        return jsonify({'error': 'Invalid image file type'}), 400
-
-    image_data = image_file.read()
-
-    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
-        return jsonify({'error': 'Image file too large'}), 400
+    # Download image from URL
+    image_data = download_image_from_url(image_url)
+    if not image_data:
+        return jsonify({'error': 'Failed to download image from URL'}), 400
 
     image_hash = compute_image_hash(image_data)
 
@@ -573,6 +595,9 @@ def search_problem_original():
     if problem:
         return jsonify({
             'uuid': problem.id,
+            'solution_latex': problem.solution_latex,
+            'answer': problem.answer,
+            'image_url': problem.image_url,
             'match_type': 'exact',
             'similarity': 1.0
         })
@@ -588,53 +613,60 @@ def search_problem_original():
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
                 return jsonify({
                     'uuid': similar_problem.id,
+                    'solution_latex': similar_problem.solution_latex,
+                    'answer': similar_problem.answer,
+                    'image_url': similar_problem.image_url,
                     'match_type': 'similar',
                     'similarity': round(similarity, 4)
                 })
 
     return jsonify({
         'uuid': None,
+        'solution_latex': None,
+        'answer': None,
+        'image_url': None,
         'match_type': None,
         'similarity': 0.0
     })
 
 
-@app.route('/problems_original', methods=['POST'])
-def create_problem_original():
+@app.route('/register_original', methods=['POST'])
+def register_problem_original():
     """
-    Create a new original math problem (no audio).
+    Register a new original math problem.
+    Downloads the image from URL and stores solution + answer in DB.
 
-    Expects: multipart/form-data with:
-        - 'image': math problem image file
-        - 'solution_latex': LaTeX solution (text field)
+    Expects JSON body:
+    {
+        "image_url": "https://example.com/problem.png",
+        "solution_latex": "Step-by-step solution in LaTeX...",
+        "answer": "42"
+    }
 
-    Returns: JSON with created problem's 'uuid'
+    Returns: JSON with created problem's uuid
     """
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image file provided'}), 400
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
 
-    if 'solution_latex' not in request.form:
+    image_url = data.get('image_url')
+    solution_latex = data.get('solution_latex')
+    answer = data.get('answer')
+
+    if not image_url:
+        return jsonify({'error': 'No image_url provided'}), 400
+
+    if not solution_latex or not str(solution_latex).strip():
         return jsonify({'error': 'No solution_latex provided'}), 400
 
-    image_file = request.files['image']
-    solution_latex = request.form['solution_latex']
-
-    if image_file.filename == '':
-        return jsonify({'error': 'No image file selected'}), 400
-
-    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
-        return jsonify({'error': 'Invalid image file type'}), 400
-
-    if not solution_latex.strip():
-        return jsonify({'error': 'solution_latex cannot be empty'}), 400
-
-    image_data = image_file.read()
-
-    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
-        return jsonify({'error': 'Image file too large'}), 400
+    # Download image from URL
+    image_data = download_image_from_url(image_url)
+    if not image_data:
+        return jsonify({'error': 'Failed to download image from URL'}), 400
 
     image_hash = compute_image_hash(image_data)
 
+    # Check if problem with same image already exists
     existing = MathProblemOriginal.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({
@@ -647,119 +679,33 @@ def create_problem_original():
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
 
+    # Save image locally
+    problem_id = str(uuid.uuid4())
+    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
+    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
+        ext = 'png'
+    image_filename = f"{problem_id}.{ext}"
+    image_path = os.path.join(app.config['IMAGE_FOLDER_ORIGINAL'], image_filename)
+    with open(image_path, 'wb') as f:
+        f.write(image_data)
+
     problem = MathProblemOriginal(
+        id=problem_id,
         image_hash=image_hash,
-        solution_latex=solution_latex,
-        latex_string=latex_string,
-        image_path=''
+        image_url=image_url,
+        image_path=image_path,
+        solution_latex=str(solution_latex),
+        answer=str(answer) if answer is not None else None,
+        latex_string=latex_string
     )
     db.session.add(problem)
-    db.session.flush()
-
-    image_file.seek(0)
-    image_path = save_file(image_file, app.config['IMAGE_FOLDER_ORIGINAL'], problem.id)
-
-    problem.image_path = image_path
-
     db.session.commit()
 
     return jsonify({
         'uuid': problem.id,
         'latex_string': latex_string,
-        'message': 'Original math problem created successfully'
+        'message': 'Original math problem registered successfully'
     }), 201
-
-
-@app.route('/problems_original/<uuid>', methods=['GET'])
-def get_problem_original(uuid):
-    """
-    Get an original math problem by UUID.
-
-    Returns: JSON with 'solution_latex' and 'image_url'
-    """
-    problem = MathProblemOriginal.query.get(uuid)
-
-    if not problem:
-        return jsonify({'error': 'Problem not found'}), 404
-
-    return jsonify({
-        'uuid': problem.id,
-        'solution_latex': problem.solution_latex,
-        'image_url': f'/problems_original/{problem.id}/image',
-        'created_at': problem.created_at.isoformat() if problem.created_at else None
-    })
-
-
-@app.route('/problems_original/<uuid>/image', methods=['GET'])
-def get_problem_original_image(uuid):
-    """
-    Get the image file for an original math problem.
-
-    Returns: Image file
-    """
-    problem = MathProblemOriginal.query.get(uuid)
-
-    if not problem:
-        return jsonify({'error': 'Problem not found'}), 404
-
-    if not os.path.exists(problem.image_path):
-        return jsonify({'error': 'Image file not found'}), 404
-
-    return send_file(problem.image_path, as_attachment=False)
-
-
-@app.route('/problems_original', methods=['GET'])
-def list_problems_original():
-    """
-    List all original math problems.
-
-    Query params:
-        - page: page number (default 1)
-        - per_page: items per page (default 20, max 100)
-
-    Returns: JSON with paginated list of problems
-    """
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 20, type=int), 100)
-
-    pagination = MathProblemOriginal.query.order_by(
-        MathProblemOriginal.created_at.desc()
-    ).paginate(page=page, per_page=per_page, error_out=False)
-
-    problems = [{
-        'uuid': p.id,
-        'image_url': f'/problems_original/{p.id}/image',
-        'created_at': p.created_at.isoformat() if p.created_at else None
-    } for p in pagination.items]
-
-    return jsonify({
-        'problems': problems,
-        'total': pagination.total,
-        'page': pagination.page,
-        'per_page': pagination.per_page,
-        'pages': pagination.pages
-    })
-
-
-@app.route('/problems_original/<uuid>', methods=['DELETE'])
-def delete_problem_original(uuid):
-    """
-    Delete an original math problem by UUID.
-
-    Returns: JSON with success message
-    """
-    problem = MathProblemOriginal.query.get(uuid)
-
-    if not problem:
-        return jsonify({'error': 'Problem not found'}), 404
-
-    if os.path.exists(problem.image_path):
-        os.remove(problem.image_path)
-
-    db.session.delete(problem)
-    db.session.commit()
-
-    return jsonify({'message': 'Original problem deleted successfully'})
 
 
 # =============================================================================

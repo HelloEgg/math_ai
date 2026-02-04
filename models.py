@@ -104,14 +104,16 @@ class MathProblemDeep(db.Model):
 
 
 class MathProblemOriginal(db.Model):
-    """Model for storing original math problems (image + solution, no audio)."""
+    """Model for storing original math problems (image URL + solution + answer, no audio)."""
 
     __tablename__ = 'math_problems_original'
 
     id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
     image_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
-    image_path = db.Column(db.String(512), nullable=False)
+    image_url = db.Column(db.String(2048), nullable=False)  # Original image URL from client
+    image_path = db.Column(db.String(512), nullable=True)   # Local cached copy
     solution_latex = db.Column(db.Text, nullable=False)
+    answer = db.Column(db.Text, nullable=True)               # Answer string
     latex_string = db.Column(db.Text, nullable=True, index=True)  # OCR extracted question text
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -124,8 +126,10 @@ class MathProblemOriginal(db.Model):
         return {
             'id': self.id,
             'image_hash': self.image_hash,
+            'image_url': self.image_url,
             'image_path': self.image_path,
             'solution_latex': self.solution_latex,
+            'answer': self.answer,
             'latex_string': self.latex_string,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
