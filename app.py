@@ -15,7 +15,7 @@ import google.generativeai as genai
 from PIL import Image, ImageDraw, ImageFont
 
 from config import Config
-from models import db, MathProblem, MathProblemSummary, MathProblemDeep
+from models import db, MathProblem, MathProblemSummary, MathProblemDeep, MathProblemOriginal
 
 
 def create_app(config_class=Config):
@@ -44,6 +44,8 @@ def create_app(config_class=Config):
     # Create upload directories - Deep
     os.makedirs(app.config['IMAGE_FOLDER_DEEP'], exist_ok=True)
     os.makedirs(app.config['AUDIO_FOLDER_DEEP'], exist_ok=True)
+    # Create upload directories - Original
+    os.makedirs(app.config['IMAGE_FOLDER_ORIGINAL'], exist_ok=True)
     # Create upload directories - Math Twin
     os.makedirs(app.config['IMAGE_FOLDER_TWIN'], exist_ok=True)
 
@@ -67,7 +69,7 @@ def migrate_add_latex_string_column(app):
     with app.app_context():
         inspector = inspect(db.engine)
 
-        tables_to_migrate = ['math_problems', 'math_problems_summary', 'math_problems_deep']
+        tables_to_migrate = ['math_problems', 'math_problems_summary', 'math_problems_deep', 'math_problems_original']
 
         for table_name in tables_to_migrate:
             # Check if table exists
@@ -533,6 +535,231 @@ def delete_problem(uuid):
     db.session.commit()
 
     return jsonify({'message': 'Problem deleted successfully'})
+
+
+# =============================================================================
+# Original Endpoints (no audio)
+# =============================================================================
+
+@app.route('/search_original', methods=['POST'])
+def search_problem_original():
+    """
+    Search for an original math problem by image using OCR-based content matching.
+
+    Expects: multipart/form-data with 'image' file
+    Returns: JSON with 'uuid' (string or null), 'match_type' ('exact', 'similar', or null), 'similarity' (0-1)
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+
+    image_file = request.files['image']
+
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+
+    image_data = image_file.read()
+
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
+
+    image_hash = compute_image_hash(image_data)
+
+    # Step 1: Try exact image hash match first (fastest)
+    problem = MathProblemOriginal.query.filter_by(image_hash=image_hash).first()
+
+    if problem:
+        return jsonify({
+            'uuid': problem.id,
+            'match_type': 'exact',
+            'similarity': 1.0
+        })
+
+    # Step 2: Extract LaTeX from image using OCR and find similar problems
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+
+        if latex_string:
+            similar_problem = find_similar_problem(latex_string, MathProblemOriginal, similarity_threshold=0.85)
+
+            if similar_problem:
+                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                return jsonify({
+                    'uuid': similar_problem.id,
+                    'match_type': 'similar',
+                    'similarity': round(similarity, 4)
+                })
+
+    return jsonify({
+        'uuid': None,
+        'match_type': None,
+        'similarity': 0.0
+    })
+
+
+@app.route('/problems_original', methods=['POST'])
+def create_problem_original():
+    """
+    Create a new original math problem (no audio).
+
+    Expects: multipart/form-data with:
+        - 'image': math problem image file
+        - 'solution_latex': LaTeX solution (text field)
+
+    Returns: JSON with created problem's 'uuid'
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+
+    if 'solution_latex' not in request.form:
+        return jsonify({'error': 'No solution_latex provided'}), 400
+
+    image_file = request.files['image']
+    solution_latex = request.form['solution_latex']
+
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+
+    if not solution_latex.strip():
+        return jsonify({'error': 'solution_latex cannot be empty'}), 400
+
+    image_data = image_file.read()
+
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
+
+    image_hash = compute_image_hash(image_data)
+
+    existing = MathProblemOriginal.query.filter_by(image_hash=image_hash).first()
+    if existing:
+        return jsonify({
+            'error': 'An original problem with this exact image already exists',
+            'existing_uuid': existing.id
+        }), 409
+
+    # Extract LaTeX from image using OCR (for content-based search)
+    latex_string = None
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+
+    problem = MathProblemOriginal(
+        image_hash=image_hash,
+        solution_latex=solution_latex,
+        latex_string=latex_string,
+        image_path=''
+    )
+    db.session.add(problem)
+    db.session.flush()
+
+    image_file.seek(0)
+    image_path = save_file(image_file, app.config['IMAGE_FOLDER_ORIGINAL'], problem.id)
+
+    problem.image_path = image_path
+
+    db.session.commit()
+
+    return jsonify({
+        'uuid': problem.id,
+        'latex_string': latex_string,
+        'message': 'Original math problem created successfully'
+    }), 201
+
+
+@app.route('/problems_original/<uuid>', methods=['GET'])
+def get_problem_original(uuid):
+    """
+    Get an original math problem by UUID.
+
+    Returns: JSON with 'solution_latex' and 'image_url'
+    """
+    problem = MathProblemOriginal.query.get(uuid)
+
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+
+    return jsonify({
+        'uuid': problem.id,
+        'solution_latex': problem.solution_latex,
+        'image_url': f'/problems_original/{problem.id}/image',
+        'created_at': problem.created_at.isoformat() if problem.created_at else None
+    })
+
+
+@app.route('/problems_original/<uuid>/image', methods=['GET'])
+def get_problem_original_image(uuid):
+    """
+    Get the image file for an original math problem.
+
+    Returns: Image file
+    """
+    problem = MathProblemOriginal.query.get(uuid)
+
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+
+    if not os.path.exists(problem.image_path):
+        return jsonify({'error': 'Image file not found'}), 404
+
+    return send_file(problem.image_path, as_attachment=False)
+
+
+@app.route('/problems_original', methods=['GET'])
+def list_problems_original():
+    """
+    List all original math problems.
+
+    Query params:
+        - page: page number (default 1)
+        - per_page: items per page (default 20, max 100)
+
+    Returns: JSON with paginated list of problems
+    """
+    page = request.args.get('page', 1, type=int)
+    per_page = min(request.args.get('per_page', 20, type=int), 100)
+
+    pagination = MathProblemOriginal.query.order_by(
+        MathProblemOriginal.created_at.desc()
+    ).paginate(page=page, per_page=per_page, error_out=False)
+
+    problems = [{
+        'uuid': p.id,
+        'image_url': f'/problems_original/{p.id}/image',
+        'created_at': p.created_at.isoformat() if p.created_at else None
+    } for p in pagination.items]
+
+    return jsonify({
+        'problems': problems,
+        'total': pagination.total,
+        'page': pagination.page,
+        'per_page': pagination.per_page,
+        'pages': pagination.pages
+    })
+
+
+@app.route('/problems_original/<uuid>', methods=['DELETE'])
+def delete_problem_original(uuid):
+    """
+    Delete an original math problem by UUID.
+
+    Returns: JSON with success message
+    """
+    problem = MathProblemOriginal.query.get(uuid)
+
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+
+    if os.path.exists(problem.image_path):
+        os.remove(problem.image_path)
+
+    db.session.delete(problem)
+    db.session.commit()
+
+    return jsonify({'message': 'Original problem deleted successfully'})
 
 
 # =============================================================================
