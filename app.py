@@ -1645,7 +1645,7 @@ def download_image_from_url(url):
     Download image from URL and return image data as bytes.
     """
     try:
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=30, verify=False)
         response.raise_for_status()
         return response.content
     except Exception as e:
