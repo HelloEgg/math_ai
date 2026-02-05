@@ -114,6 +114,7 @@ class MathProblemOriginal(db.Model):
     image_path = db.Column(db.String(512), nullable=True)   # Local cached copy
     solution_latex = db.Column(db.Text, nullable=False)
     answer = db.Column(db.Text, nullable=True)               # Answer string
+    feature = db.Column(db.Text, nullable=True)               # Feature plain text
     latex_string = db.Column(db.Text, nullable=True, index=True)  # OCR extracted question text
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -130,6 +131,7 @@ class MathProblemOriginal(db.Model):
             'image_path': self.image_path,
             'solution_latex': self.solution_latex,
             'answer': self.answer,
+            'feature': self.feature,
             'latex_string': self.latex_string,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None

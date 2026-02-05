@@ -92,6 +92,7 @@ def migrate_add_latex_string_column(app):
             migrations = {
                 'image_url': 'ALTER TABLE math_problems_original ADD COLUMN image_url VARCHAR(2048)',
                 'answer': 'ALTER TABLE math_problems_original ADD COLUMN answer TEXT',
+                'feature': 'ALTER TABLE math_problems_original ADD COLUMN feature TEXT',
             }
 
             for col_name, sql in migrations.items():
@@ -563,15 +564,16 @@ def search_problem_original():
     """
     Search for an original math problem by image URL.
     Downloads the image, then searches DB by hash and OCR-based fuzzy matching.
-    If found, returns the stored solution and answer.
+    If found, returns the stored solution, answer, and feature.
 
     Expects JSON body:
     {
-        "image_url": "https://example.com/problem.png"
+        "image_url": "https://example.com/problem.png",
+        "feature": "something"
     }
 
     Returns:
-        - If found: uuid, solution_latex, answer, image_url, match_type, similarity
+        - If found: uuid, solution_latex, answer, feature, image_url, match_type, similarity
         - If not found: uuid=null
     """
     data = request.get_json()
@@ -579,6 +581,7 @@ def search_problem_original():
         return jsonify({'error': 'No JSON data provided'}), 400
 
     image_url = data.get('image_url')
+    feature = data.get('feature')
     if not image_url:
         return jsonify({'error': 'No image_url provided'}), 400
 
@@ -597,6 +600,7 @@ def search_problem_original():
             'uuid': problem.id,
             'solution_latex': problem.solution_latex,
             'answer': problem.answer,
+            'feature': problem.feature,
             'image_url': problem.image_url,
             'match_type': 'exact',
             'similarity': 1.0
@@ -615,6 +619,7 @@ def search_problem_original():
                     'uuid': similar_problem.id,
                     'solution_latex': similar_problem.solution_latex,
                     'answer': similar_problem.answer,
+                    'feature': similar_problem.feature,
                     'image_url': similar_problem.image_url,
                     'match_type': 'similar',
                     'similarity': round(similarity, 4)
@@ -624,6 +629,7 @@ def search_problem_original():
         'uuid': None,
         'solution_latex': None,
         'answer': None,
+        'feature': None,
         'image_url': None,
         'match_type': None,
         'similarity': 0.0
@@ -634,13 +640,14 @@ def search_problem_original():
 def register_problem_original():
     """
     Register a new original math problem.
-    Downloads the image from URL and stores solution + answer in DB.
+    Downloads the image from URL and stores solution + answer + feature in DB.
 
     Expects JSON body:
     {
         "image_url": "https://example.com/problem.png",
         "solution_latex": "Step-by-step solution in LaTeX...",
-        "answer": "42"
+        "answer": "42",
+        "feature": "something"
     }
 
     Returns: JSON with created problem's uuid
@@ -652,6 +659,7 @@ def register_problem_original():
     image_url = data.get('image_url')
     solution_latex = data.get('solution_latex')
     answer = data.get('answer')
+    feature = data.get('feature')
 
     if not image_url:
         return jsonify({'error': 'No image_url provided'}), 400
@@ -696,6 +704,7 @@ def register_problem_original():
         image_path=image_path,
         solution_latex=str(solution_latex),
         answer=str(answer) if answer is not None else None,
+        feature=str(feature) if feature is not None else None,
         latex_string=latex_string
     )
     db.session.add(problem)
