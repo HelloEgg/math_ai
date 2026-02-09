@@ -15,7 +15,7 @@ import google.generativeai as genai
 from PIL import Image, ImageDraw, ImageFont
 
 from config import Config
-from models import db, MathProblem, MathProblemSummary, MathProblemDeep, MathProblemOriginal
+from models import db, MathProblem, MathProblemSummary, MathProblemDeep, MathProblemOriginal, EnglishProblem, ScienceProblem, SocialScienceProblem, KoreanProblem
 
 
 def create_app(config_class=Config):
@@ -46,6 +46,14 @@ def create_app(config_class=Config):
     os.makedirs(app.config['AUDIO_FOLDER_DEEP'], exist_ok=True)
     # Create upload directories - Original
     os.makedirs(app.config['IMAGE_FOLDER_ORIGINAL'], exist_ok=True)
+    # Create upload directories - English
+    os.makedirs(app.config['IMAGE_FOLDER_ENGLISH'], exist_ok=True)
+    # Create upload directories - Science
+    os.makedirs(app.config['IMAGE_FOLDER_SCIENCE'], exist_ok=True)
+    # Create upload directories - Social Science
+    os.makedirs(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE'], exist_ok=True)
+    # Create upload directories - Korean
+    os.makedirs(app.config['IMAGE_FOLDER_KOREAN'], exist_ok=True)
     # Create upload directories - Math Twin
     os.makedirs(app.config['IMAGE_FOLDER_TWIN'], exist_ok=True)
 
@@ -715,6 +723,806 @@ def register_problem_original():
         'latex_string': latex_string,
         'message': 'Original math problem registered successfully'
     }), 201
+
+
+# =============================================================================
+# English Endpoints
+# =============================================================================
+
+@app.route('/search_English', methods=['POST'])
+def search_problem_english():
+    """
+    Search for an English problem by image URL.
+    Downloads the image, then searches DB by hash and OCR-based fuzzy matching.
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+
+    image_url = data.get('image_url')
+    feature = data.get('feature')
+    if not image_url:
+        return jsonify({'error': 'No image_url provided'}), 400
+
+    image_data = download_image_from_url(image_url)
+    if not image_data:
+        return jsonify({'error': 'Failed to download image from URL'}), 400
+
+    image_hash = compute_image_hash(image_data)
+
+    problem = EnglishProblem.query.filter_by(image_hash=image_hash).first()
+    if problem:
+        return jsonify({
+            'uuid': problem.id,
+            'solution_latex': problem.solution_latex,
+            'answer': problem.answer,
+            'feature': problem.feature,
+            'image_url': problem.image_url,
+            'match_type': 'exact',
+            'similarity': 1.0
+        })
+
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if latex_string:
+            similar_problem = find_similar_problem(latex_string, EnglishProblem, similarity_threshold=0.85)
+            if similar_problem:
+                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                return jsonify({
+                    'uuid': similar_problem.id,
+                    'solution_latex': similar_problem.solution_latex,
+                    'answer': similar_problem.answer,
+                    'feature': similar_problem.feature,
+                    'image_url': similar_problem.image_url,
+                    'match_type': 'similar',
+                    'similarity': round(similarity, 4)
+                })
+
+    return jsonify({
+        'uuid': None,
+        'solution_latex': None,
+        'answer': None,
+        'feature': None,
+        'image_url': None,
+        'match_type': None,
+        'similarity': 0.0
+    })
+
+
+@app.route('/problems_English', methods=['POST'])
+def create_problem_english():
+    """
+    Create a new English problem.
+    Expects JSON: {"image_url": "...", "solution_latex": "...", "answer": "...", "feature": "..."}
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+
+    image_url = data.get('image_url')
+    solution_latex = data.get('solution_latex')
+    answer = data.get('answer')
+    feature = data.get('feature')
+
+    if not image_url:
+        return jsonify({'error': 'No image_url provided'}), 400
+    if not solution_latex or not str(solution_latex).strip():
+        return jsonify({'error': 'No solution_latex provided'}), 400
+
+    image_data = download_image_from_url(image_url)
+    if not image_data:
+        return jsonify({'error': 'Failed to download image from URL'}), 400
+
+    image_hash = compute_image_hash(image_data)
+
+    existing = EnglishProblem.query.filter_by(image_hash=image_hash).first()
+    if existing:
+        return jsonify({
+            'error': 'An English problem with this exact image already exists',
+            'existing_uuid': existing.id
+        }), 409
+
+    latex_string = None
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+
+    problem_id = str(uuid.uuid4())
+    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
+    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
+        ext = 'png'
+    image_filename = f"{problem_id}.{ext}"
+    image_path = os.path.join(app.config['IMAGE_FOLDER_ENGLISH'], image_filename)
+    with open(image_path, 'wb') as f:
+        f.write(image_data)
+
+    problem = EnglishProblem(
+        id=problem_id,
+        image_hash=image_hash,
+        image_url=image_url,
+        image_path=image_path,
+        solution_latex=str(solution_latex),
+        answer=str(answer) if answer is not None else None,
+        feature=str(feature) if feature is not None else None,
+        latex_string=latex_string
+    )
+    db.session.add(problem)
+    db.session.commit()
+
+    return jsonify({
+        'uuid': problem.id,
+        'latex_string': latex_string,
+        'message': 'English problem created successfully'
+    }), 201
+
+
+@app.route('/problems_English/<uuid>', methods=['GET'])
+def get_problem_english(uuid):
+    """Get an English problem by UUID."""
+    problem = EnglishProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+
+    return jsonify({
+        'uuid': problem.id,
+        'solution_latex': problem.solution_latex,
+        'answer': problem.answer,
+        'feature': problem.feature,
+        'image_url': f'/problems_English/{problem.id}/image',
+        'created_at': problem.created_at.isoformat() if problem.created_at else None
+    })
+
+
+@app.route('/problems_English/<uuid>/image', methods=['GET'])
+def get_problem_english_image(uuid):
+    """Get the image file for an English problem."""
+    problem = EnglishProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.image_path or not os.path.exists(problem.image_path):
+        return jsonify({'error': 'Image file not found'}), 404
+    return send_file(problem.image_path, as_attachment=False)
+
+
+@app.route('/problems_English', methods=['GET'])
+def list_problems_english():
+    """List all English problems with pagination."""
+    page = request.args.get('page', 1, type=int)
+    per_page = min(request.args.get('per_page', 20, type=int), 100)
+
+    pagination = EnglishProblem.query.order_by(
+        EnglishProblem.created_at.desc()
+    ).paginate(page=page, per_page=per_page, error_out=False)
+
+    problems = [{
+        'uuid': p.id,
+        'image_url': f'/problems_English/{p.id}/image',
+        'feature': p.feature,
+        'created_at': p.created_at.isoformat() if p.created_at else None
+    } for p in pagination.items]
+
+    return jsonify({
+        'problems': problems,
+        'total': pagination.total,
+        'page': pagination.page,
+        'per_page': pagination.per_page,
+        'pages': pagination.pages
+    })
+
+
+@app.route('/problems_English/<uuid>', methods=['DELETE'])
+def delete_problem_english(uuid):
+    """Delete an English problem by UUID."""
+    problem = EnglishProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+
+    if problem.image_path and os.path.exists(problem.image_path):
+        os.remove(problem.image_path)
+
+    db.session.delete(problem)
+    db.session.commit()
+
+    return jsonify({'message': 'English problem deleted successfully'})
+
+
+# =============================================================================
+# Science Endpoints
+# =============================================================================
+
+@app.route('/search_science', methods=['POST'])
+def search_problem_science():
+    """
+    Search for a science problem by image URL.
+    Downloads the image, then searches DB by hash and OCR-based fuzzy matching.
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+
+    image_url = data.get('image_url')
+    feature = data.get('feature')
+    if not image_url:
+        return jsonify({'error': 'No image_url provided'}), 400
+
+    image_data = download_image_from_url(image_url)
+    if not image_data:
+        return jsonify({'error': 'Failed to download image from URL'}), 400
+
+    image_hash = compute_image_hash(image_data)
+
+    problem = ScienceProblem.query.filter_by(image_hash=image_hash).first()
+    if problem:
+        return jsonify({
+            'uuid': problem.id,
+            'solution_latex': problem.solution_latex,
+            'answer': problem.answer,
+            'feature': problem.feature,
+            'image_url': problem.image_url,
+            'match_type': 'exact',
+            'similarity': 1.0
+        })
+
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if latex_string:
+            similar_problem = find_similar_problem(latex_string, ScienceProblem, similarity_threshold=0.85)
+            if similar_problem:
+                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                return jsonify({
+                    'uuid': similar_problem.id,
+                    'solution_latex': similar_problem.solution_latex,
+                    'answer': similar_problem.answer,
+                    'feature': similar_problem.feature,
+                    'image_url': similar_problem.image_url,
+                    'match_type': 'similar',
+                    'similarity': round(similarity, 4)
+                })
+
+    return jsonify({
+        'uuid': None,
+        'solution_latex': None,
+        'answer': None,
+        'feature': None,
+        'image_url': None,
+        'match_type': None,
+        'similarity': 0.0
+    })
+
+
+@app.route('/problems_science', methods=['POST'])
+def create_problem_science():
+    """
+    Create a new science problem.
+    Expects JSON: {"image_url": "...", "solution_latex": "...", "answer": "...", "feature": "..."}
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+
+    image_url = data.get('image_url')
+    solution_latex = data.get('solution_latex')
+    answer = data.get('answer')
+    feature = data.get('feature')
+
+    if not image_url:
+        return jsonify({'error': 'No image_url provided'}), 400
+    if not solution_latex or not str(solution_latex).strip():
+        return jsonify({'error': 'No solution_latex provided'}), 400
+
+    image_data = download_image_from_url(image_url)
+    if not image_data:
+        return jsonify({'error': 'Failed to download image from URL'}), 400
+
+    image_hash = compute_image_hash(image_data)
+
+    existing = ScienceProblem.query.filter_by(image_hash=image_hash).first()
+    if existing:
+        return jsonify({
+            'error': 'A science problem with this exact image already exists',
+            'existing_uuid': existing.id
+        }), 409
+
+    latex_string = None
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+
+    problem_id = str(uuid.uuid4())
+    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
+    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
+        ext = 'png'
+    image_filename = f"{problem_id}.{ext}"
+    image_path = os.path.join(app.config['IMAGE_FOLDER_SCIENCE'], image_filename)
+    with open(image_path, 'wb') as f:
+        f.write(image_data)
+
+    problem = ScienceProblem(
+        id=problem_id,
+        image_hash=image_hash,
+        image_url=image_url,
+        image_path=image_path,
+        solution_latex=str(solution_latex),
+        answer=str(answer) if answer is not None else None,
+        feature=str(feature) if feature is not None else None,
+        latex_string=latex_string
+    )
+    db.session.add(problem)
+    db.session.commit()
+
+    return jsonify({
+        'uuid': problem.id,
+        'latex_string': latex_string,
+        'message': 'Science problem created successfully'
+    }), 201
+
+
+@app.route('/problems_science/<uuid>', methods=['GET'])
+def get_problem_science(uuid):
+    """Get a science problem by UUID."""
+    problem = ScienceProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+
+    return jsonify({
+        'uuid': problem.id,
+        'solution_latex': problem.solution_latex,
+        'answer': problem.answer,
+        'feature': problem.feature,
+        'image_url': f'/problems_science/{problem.id}/image',
+        'created_at': problem.created_at.isoformat() if problem.created_at else None
+    })
+
+
+@app.route('/problems_science/<uuid>/image', methods=['GET'])
+def get_problem_science_image(uuid):
+    """Get the image file for a science problem."""
+    problem = ScienceProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.image_path or not os.path.exists(problem.image_path):
+        return jsonify({'error': 'Image file not found'}), 404
+    return send_file(problem.image_path, as_attachment=False)
+
+
+@app.route('/problems_science', methods=['GET'])
+def list_problems_science():
+    """List all science problems with pagination."""
+    page = request.args.get('page', 1, type=int)
+    per_page = min(request.args.get('per_page', 20, type=int), 100)
+
+    pagination = ScienceProblem.query.order_by(
+        ScienceProblem.created_at.desc()
+    ).paginate(page=page, per_page=per_page, error_out=False)
+
+    problems = [{
+        'uuid': p.id,
+        'image_url': f'/problems_science/{p.id}/image',
+        'feature': p.feature,
+        'created_at': p.created_at.isoformat() if p.created_at else None
+    } for p in pagination.items]
+
+    return jsonify({
+        'problems': problems,
+        'total': pagination.total,
+        'page': pagination.page,
+        'per_page': pagination.per_page,
+        'pages': pagination.pages
+    })
+
+
+@app.route('/problems_science/<uuid>', methods=['DELETE'])
+def delete_problem_science(uuid):
+    """Delete a science problem by UUID."""
+    problem = ScienceProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+
+    if problem.image_path and os.path.exists(problem.image_path):
+        os.remove(problem.image_path)
+
+    db.session.delete(problem)
+    db.session.commit()
+
+    return jsonify({'message': 'Science problem deleted successfully'})
+
+
+# =============================================================================
+# Social Science Endpoints
+# =============================================================================
+
+@app.route('/search_social_science', methods=['POST'])
+def search_problem_social_science():
+    """
+    Search for a social science problem by image URL.
+    Downloads the image, then searches DB by hash and OCR-based fuzzy matching.
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+
+    image_url = data.get('image_url')
+    feature = data.get('feature')
+    if not image_url:
+        return jsonify({'error': 'No image_url provided'}), 400
+
+    image_data = download_image_from_url(image_url)
+    if not image_data:
+        return jsonify({'error': 'Failed to download image from URL'}), 400
+
+    image_hash = compute_image_hash(image_data)
+
+    problem = SocialScienceProblem.query.filter_by(image_hash=image_hash).first()
+    if problem:
+        return jsonify({
+            'uuid': problem.id,
+            'solution_latex': problem.solution_latex,
+            'answer': problem.answer,
+            'feature': problem.feature,
+            'image_url': problem.image_url,
+            'match_type': 'exact',
+            'similarity': 1.0
+        })
+
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if latex_string:
+            similar_problem = find_similar_problem(latex_string, SocialScienceProblem, similarity_threshold=0.85)
+            if similar_problem:
+                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                return jsonify({
+                    'uuid': similar_problem.id,
+                    'solution_latex': similar_problem.solution_latex,
+                    'answer': similar_problem.answer,
+                    'feature': similar_problem.feature,
+                    'image_url': similar_problem.image_url,
+                    'match_type': 'similar',
+                    'similarity': round(similarity, 4)
+                })
+
+    return jsonify({
+        'uuid': None,
+        'solution_latex': None,
+        'answer': None,
+        'feature': None,
+        'image_url': None,
+        'match_type': None,
+        'similarity': 0.0
+    })
+
+
+@app.route('/problems_social_science', methods=['POST'])
+def create_problem_social_science():
+    """
+    Create a new social science problem.
+    Expects JSON: {"image_url": "...", "solution_latex": "...", "answer": "...", "feature": "..."}
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+
+    image_url = data.get('image_url')
+    solution_latex = data.get('solution_latex')
+    answer = data.get('answer')
+    feature = data.get('feature')
+
+    if not image_url:
+        return jsonify({'error': 'No image_url provided'}), 400
+    if not solution_latex or not str(solution_latex).strip():
+        return jsonify({'error': 'No solution_latex provided'}), 400
+
+    image_data = download_image_from_url(image_url)
+    if not image_data:
+        return jsonify({'error': 'Failed to download image from URL'}), 400
+
+    image_hash = compute_image_hash(image_data)
+
+    existing = SocialScienceProblem.query.filter_by(image_hash=image_hash).first()
+    if existing:
+        return jsonify({
+            'error': 'A social science problem with this exact image already exists',
+            'existing_uuid': existing.id
+        }), 409
+
+    latex_string = None
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+
+    problem_id = str(uuid.uuid4())
+    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
+    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
+        ext = 'png'
+    image_filename = f"{problem_id}.{ext}"
+    image_path = os.path.join(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE'], image_filename)
+    with open(image_path, 'wb') as f:
+        f.write(image_data)
+
+    problem = SocialScienceProblem(
+        id=problem_id,
+        image_hash=image_hash,
+        image_url=image_url,
+        image_path=image_path,
+        solution_latex=str(solution_latex),
+        answer=str(answer) if answer is not None else None,
+        feature=str(feature) if feature is not None else None,
+        latex_string=latex_string
+    )
+    db.session.add(problem)
+    db.session.commit()
+
+    return jsonify({
+        'uuid': problem.id,
+        'latex_string': latex_string,
+        'message': 'Social science problem created successfully'
+    }), 201
+
+
+@app.route('/problems_social_science/<uuid>', methods=['GET'])
+def get_problem_social_science(uuid):
+    """Get a social science problem by UUID."""
+    problem = SocialScienceProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+
+    return jsonify({
+        'uuid': problem.id,
+        'solution_latex': problem.solution_latex,
+        'answer': problem.answer,
+        'feature': problem.feature,
+        'image_url': f'/problems_social_science/{problem.id}/image',
+        'created_at': problem.created_at.isoformat() if problem.created_at else None
+    })
+
+
+@app.route('/problems_social_science/<uuid>/image', methods=['GET'])
+def get_problem_social_science_image(uuid):
+    """Get the image file for a social science problem."""
+    problem = SocialScienceProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.image_path or not os.path.exists(problem.image_path):
+        return jsonify({'error': 'Image file not found'}), 404
+    return send_file(problem.image_path, as_attachment=False)
+
+
+@app.route('/problems_social_science', methods=['GET'])
+def list_problems_social_science():
+    """List all social science problems with pagination."""
+    page = request.args.get('page', 1, type=int)
+    per_page = min(request.args.get('per_page', 20, type=int), 100)
+
+    pagination = SocialScienceProblem.query.order_by(
+        SocialScienceProblem.created_at.desc()
+    ).paginate(page=page, per_page=per_page, error_out=False)
+
+    problems = [{
+        'uuid': p.id,
+        'image_url': f'/problems_social_science/{p.id}/image',
+        'feature': p.feature,
+        'created_at': p.created_at.isoformat() if p.created_at else None
+    } for p in pagination.items]
+
+    return jsonify({
+        'problems': problems,
+        'total': pagination.total,
+        'page': pagination.page,
+        'per_page': pagination.per_page,
+        'pages': pagination.pages
+    })
+
+
+@app.route('/problems_social_science/<uuid>', methods=['DELETE'])
+def delete_problem_social_science(uuid):
+    """Delete a social science problem by UUID."""
+    problem = SocialScienceProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+
+    if problem.image_path and os.path.exists(problem.image_path):
+        os.remove(problem.image_path)
+
+    db.session.delete(problem)
+    db.session.commit()
+
+    return jsonify({'message': 'Social science problem deleted successfully'})
+
+
+# =============================================================================
+# Korean Endpoints
+# =============================================================================
+
+@app.route('/search_Korean', methods=['POST'])
+def search_problem_korean():
+    """
+    Search for a Korean problem by image URL.
+    Downloads the image, then searches DB by hash and OCR-based fuzzy matching.
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+
+    image_url = data.get('image_url')
+    feature = data.get('feature')
+    if not image_url:
+        return jsonify({'error': 'No image_url provided'}), 400
+
+    image_data = download_image_from_url(image_url)
+    if not image_data:
+        return jsonify({'error': 'Failed to download image from URL'}), 400
+
+    image_hash = compute_image_hash(image_data)
+
+    problem = KoreanProblem.query.filter_by(image_hash=image_hash).first()
+    if problem:
+        return jsonify({
+            'uuid': problem.id,
+            'solution_latex': problem.solution_latex,
+            'answer': problem.answer,
+            'feature': problem.feature,
+            'image_url': problem.image_url,
+            'match_type': 'exact',
+            'similarity': 1.0
+        })
+
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if latex_string:
+            similar_problem = find_similar_problem(latex_string, KoreanProblem, similarity_threshold=0.85)
+            if similar_problem:
+                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                return jsonify({
+                    'uuid': similar_problem.id,
+                    'solution_latex': similar_problem.solution_latex,
+                    'answer': similar_problem.answer,
+                    'feature': similar_problem.feature,
+                    'image_url': similar_problem.image_url,
+                    'match_type': 'similar',
+                    'similarity': round(similarity, 4)
+                })
+
+    return jsonify({
+        'uuid': None,
+        'solution_latex': None,
+        'answer': None,
+        'feature': None,
+        'image_url': None,
+        'match_type': None,
+        'similarity': 0.0
+    })
+
+
+@app.route('/problems_Korean', methods=['POST'])
+def create_problem_korean():
+    """
+    Create a new Korean problem.
+    Expects JSON: {"image_url": "...", "solution_latex": "...", "answer": "...", "feature": "..."}
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+
+    image_url = data.get('image_url')
+    solution_latex = data.get('solution_latex')
+    answer = data.get('answer')
+    feature = data.get('feature')
+
+    if not image_url:
+        return jsonify({'error': 'No image_url provided'}), 400
+    if not solution_latex or not str(solution_latex).strip():
+        return jsonify({'error': 'No solution_latex provided'}), 400
+
+    image_data = download_image_from_url(image_url)
+    if not image_data:
+        return jsonify({'error': 'Failed to download image from URL'}), 400
+
+    image_hash = compute_image_hash(image_data)
+
+    existing = KoreanProblem.query.filter_by(image_hash=image_hash).first()
+    if existing:
+        return jsonify({
+            'error': 'A Korean problem with this exact image already exists',
+            'existing_uuid': existing.id
+        }), 409
+
+    latex_string = None
+    if app.config.get('GEMINI_API_KEY'):
+        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+
+    problem_id = str(uuid.uuid4())
+    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
+    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
+        ext = 'png'
+    image_filename = f"{problem_id}.{ext}"
+    image_path = os.path.join(app.config['IMAGE_FOLDER_KOREAN'], image_filename)
+    with open(image_path, 'wb') as f:
+        f.write(image_data)
+
+    problem = KoreanProblem(
+        id=problem_id,
+        image_hash=image_hash,
+        image_url=image_url,
+        image_path=image_path,
+        solution_latex=str(solution_latex),
+        answer=str(answer) if answer is not None else None,
+        feature=str(feature) if feature is not None else None,
+        latex_string=latex_string
+    )
+    db.session.add(problem)
+    db.session.commit()
+
+    return jsonify({
+        'uuid': problem.id,
+        'latex_string': latex_string,
+        'message': 'Korean problem created successfully'
+    }), 201
+
+
+@app.route('/problems_Korean/<uuid>', methods=['GET'])
+def get_problem_korean(uuid):
+    """Get a Korean problem by UUID."""
+    problem = KoreanProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+
+    return jsonify({
+        'uuid': problem.id,
+        'solution_latex': problem.solution_latex,
+        'answer': problem.answer,
+        'feature': problem.feature,
+        'image_url': f'/problems_Korean/{problem.id}/image',
+        'created_at': problem.created_at.isoformat() if problem.created_at else None
+    })
+
+
+@app.route('/problems_Korean/<uuid>/image', methods=['GET'])
+def get_problem_korean_image(uuid):
+    """Get the image file for a Korean problem."""
+    problem = KoreanProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.image_path or not os.path.exists(problem.image_path):
+        return jsonify({'error': 'Image file not found'}), 404
+    return send_file(problem.image_path, as_attachment=False)
+
+
+@app.route('/problems_Korean', methods=['GET'])
+def list_problems_korean():
+    """List all Korean problems with pagination."""
+    page = request.args.get('page', 1, type=int)
+    per_page = min(request.args.get('per_page', 20, type=int), 100)
+
+    pagination = KoreanProblem.query.order_by(
+        KoreanProblem.created_at.desc()
+    ).paginate(page=page, per_page=per_page, error_out=False)
+
+    problems = [{
+        'uuid': p.id,
+        'image_url': f'/problems_Korean/{p.id}/image',
+        'feature': p.feature,
+        'created_at': p.created_at.isoformat() if p.created_at else None
+    } for p in pagination.items]
+
+    return jsonify({
+        'problems': problems,
+        'total': pagination.total,
+        'page': pagination.page,
+        'per_page': pagination.per_page,
+        'pages': pagination.pages
+    })
+
+
+@app.route('/problems_Korean/<uuid>', methods=['DELETE'])
+def delete_problem_korean(uuid):
+    """Delete a Korean problem by UUID."""
+    problem = KoreanProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+
+    if problem.image_path and os.path.exists(problem.image_path):
+        os.remove(problem.image_path)
+
+    db.session.delete(problem)
+    db.session.commit()
+
+    return jsonify({'message': 'Korean problem deleted successfully'})
 
 
 # =============================================================================
