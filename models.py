@@ -272,3 +272,235 @@ class KoreanProblem(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
+
+
+# =============================================================================
+# Summary Models for Other Subjects
+# =============================================================================
+
+class EnglishProblemSummary(db.Model):
+    """Model for storing English problem summaries."""
+    __tablename__ = 'english_problems_summary'
+
+    id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
+    image_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    image_url = db.Column(db.String(2048), nullable=False)
+    image_path = db.Column(db.String(512), nullable=True)
+    solution_latex = db.Column(db.Text, nullable=False)
+    answer = db.Column(db.Text, nullable=True)
+    feature = db.Column(db.Text, nullable=True)
+    latex_string = db.Column(db.Text, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<EnglishProblemSummary {self.id}>'
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
+            'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+
+class ScienceProblemSummary(db.Model):
+    """Model for storing science problem summaries."""
+    __tablename__ = 'science_problems_summary'
+
+    id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
+    image_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    image_url = db.Column(db.String(2048), nullable=False)
+    image_path = db.Column(db.String(512), nullable=True)
+    solution_latex = db.Column(db.Text, nullable=False)
+    answer = db.Column(db.Text, nullable=True)
+    feature = db.Column(db.Text, nullable=True)
+    latex_string = db.Column(db.Text, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<ScienceProblemSummary {self.id}>'
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
+            'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+
+class SocialScienceProblemSummary(db.Model):
+    """Model for storing social science problem summaries."""
+    __tablename__ = 'social_science_problems_summary'
+
+    id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
+    image_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    image_url = db.Column(db.String(2048), nullable=False)
+    image_path = db.Column(db.String(512), nullable=True)
+    solution_latex = db.Column(db.Text, nullable=False)
+    answer = db.Column(db.Text, nullable=True)
+    feature = db.Column(db.Text, nullable=True)
+    latex_string = db.Column(db.Text, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<SocialScienceProblemSummary {self.id}>'
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
+            'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+
+class KoreanProblemSummary(db.Model):
+    """Model for storing Korean problem summaries."""
+    __tablename__ = 'korean_problems_summary'
+
+    id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
+    image_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    image_url = db.Column(db.String(2048), nullable=False)
+    image_path = db.Column(db.String(512), nullable=True)
+    solution_latex = db.Column(db.Text, nullable=False)
+    answer = db.Column(db.Text, nullable=True)
+    feature = db.Column(db.Text, nullable=True)
+    latex_string = db.Column(db.Text, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<KoreanProblemSummary {self.id}>'
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
+            'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+
+# =============================================================================
+# Deep Models for Other Subjects
+# =============================================================================
+
+class EnglishProblemDeep(db.Model):
+    """Model for storing English problem deep solutions."""
+    __tablename__ = 'english_problems_deep'
+
+    id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
+    image_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    image_url = db.Column(db.String(2048), nullable=False)
+    image_path = db.Column(db.String(512), nullable=True)
+    solution_latex = db.Column(db.Text, nullable=False)
+    answer = db.Column(db.Text, nullable=True)
+    feature = db.Column(db.Text, nullable=True)
+    latex_string = db.Column(db.Text, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<EnglishProblemDeep {self.id}>'
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
+            'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+
+class ScienceProblemDeep(db.Model):
+    """Model for storing science problem deep solutions."""
+    __tablename__ = 'science_problems_deep'
+
+    id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
+    image_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    image_url = db.Column(db.String(2048), nullable=False)
+    image_path = db.Column(db.String(512), nullable=True)
+    solution_latex = db.Column(db.Text, nullable=False)
+    answer = db.Column(db.Text, nullable=True)
+    feature = db.Column(db.Text, nullable=True)
+    latex_string = db.Column(db.Text, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<ScienceProblemDeep {self.id}>'
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
+            'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+
+class SocialScienceProblemDeep(db.Model):
+    """Model for storing social science problem deep solutions."""
+    __tablename__ = 'social_science_problems_deep'
+
+    id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
+    image_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    image_url = db.Column(db.String(2048), nullable=False)
+    image_path = db.Column(db.String(512), nullable=True)
+    solution_latex = db.Column(db.Text, nullable=False)
+    answer = db.Column(db.Text, nullable=True)
+    feature = db.Column(db.Text, nullable=True)
+    latex_string = db.Column(db.Text, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<SocialScienceProblemDeep {self.id}>'
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
+            'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
+
+class KoreanProblemDeep(db.Model):
+    """Model for storing Korean problem deep solutions."""
+    __tablename__ = 'korean_problems_deep'
+
+    id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
+    image_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    image_url = db.Column(db.String(2048), nullable=False)
+    image_path = db.Column(db.String(512), nullable=True)
+    solution_latex = db.Column(db.Text, nullable=False)
+    answer = db.Column(db.Text, nullable=True)
+    feature = db.Column(db.Text, nullable=True)
+    latex_string = db.Column(db.Text, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<KoreanProblemDeep {self.id}>'
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
+            'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
