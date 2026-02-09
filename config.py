@@ -26,6 +26,18 @@ class Config:
     # File uploads - Original
     IMAGE_FOLDER_ORIGINAL = os.path.join(UPLOAD_FOLDER, 'images_original')
 
+    # File uploads - English
+    IMAGE_FOLDER_ENGLISH = os.path.join(UPLOAD_FOLDER, 'images_english')
+
+    # File uploads - Science
+    IMAGE_FOLDER_SCIENCE = os.path.join(UPLOAD_FOLDER, 'images_science')
+
+    # File uploads - Social Science
+    IMAGE_FOLDER_SOCIAL_SCIENCE = os.path.join(UPLOAD_FOLDER, 'images_social_science')
+
+    # File uploads - Korean
+    IMAGE_FOLDER_KOREAN = os.path.join(UPLOAD_FOLDER, 'images_korean')
+
     # File uploads - Math Twin
     IMAGE_FOLDER_TWIN = os.path.join(UPLOAD_FOLDER, 'images_twin')
 
