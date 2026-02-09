@@ -190,6 +190,138 @@ If there are multiple choice options, include them with their labels (①②③�
         return None
 
 
+def extract_text_from_image(image_data, api_key):
+    """
+    Extract plain text from an image using Gemini Vision API.
+    Used for non-math subjects (English, science, social_science, Korean).
+
+    Args:
+        image_data: Image data as bytes
+        api_key: Gemini API key
+
+    Returns:
+        Extracted text string, or None if extraction fails
+    """
+    try:
+        # Determine mime type from image data
+        img = Image.open(io.BytesIO(image_data))
+        mime_type = f"image/{img.format.lower()}" if img.format else "image/png"
+        if mime_type == "image/jpeg":
+            mime_type = "image/jpeg"
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.0-flash')
+
+        prompt = """Extract ALL text content from this image exactly as it appears.
+
+Output the complete text in a normalized format:
+1. Include ALL text, numbers, and choices if present
+2. Preserve the content structure (question text, passages, choices)
+3. If there are multiple choice options, include them with their labels (①②③④⑤ or 1,2,3,4,5 or A,B,C,D,E etc.)
+4. Maintain paragraph breaks with newlines
+
+Output ONLY the extracted text, nothing else. No explanations or comments."""
+
+        image_part = {
+            "mime_type": mime_type,
+            "data": base64.b64encode(image_data).decode('utf-8')
+        }
+
+        response = model.generate_content([prompt, image_part])
+        text_string = response.text.strip()
+
+        print(f"Text OCR extracted: {text_string[:200]}..." if len(text_string) > 200 else f"Text OCR extracted: {text_string}")
+        return text_string
+
+    except Exception as e:
+        print(f"Text OCR extraction failed: {e}")
+        return None
+
+
+def normalize_text(text_string):
+    """
+    Normalize a text string for comparison.
+    Removes extra whitespace, normalizes punctuation.
+
+    Args:
+        text_string: Text string to normalize
+
+    Returns:
+        Normalized string
+    """
+    if not text_string:
+        return ""
+
+    # Convert to lowercase for comparison
+    s = text_string.lower()
+
+    # Normalize whitespace (multiple spaces/newlines to single space)
+    s = re.sub(r'\s+', ' ', s)
+
+    # Remove leading/trailing whitespace
+    s = s.strip()
+
+    # Normalize common punctuation variations
+    s = s.replace(''', "'").replace(''', "'").replace('"', '"').replace('"', '"')
+    s = s.replace('–', '-').replace('—', '-')
+
+    return s
+
+
+def calculate_text_similarity(text1, text2):
+    """
+    Calculate similarity ratio between two text strings.
+
+    Args:
+        text1: First text string
+        text2: Second text string
+
+    Returns:
+        Similarity ratio between 0 and 1
+    """
+    norm1 = normalize_text(text1)
+    norm2 = normalize_text(text2)
+
+    if not norm1 or not norm2:
+        return 0.0
+
+    return SequenceMatcher(None, norm1, norm2).ratio()
+
+
+def find_similar_text_problem(text_string, model_class, similarity_threshold=0.85):
+    """
+    Find a problem with similar text content in the database.
+    Used for non-math subjects (English, science, social_science, Korean).
+
+    Args:
+        text_string: The text string to search for
+        model_class: The database model class to search
+        similarity_threshold: Minimum similarity ratio to consider a match (default 0.85)
+
+    Returns:
+        The matching problem record, or None if no match found
+    """
+    if not text_string:
+        return None
+
+    # Get all problems with latex_string (which stores text for non-math subjects)
+    problems = model_class.query.filter(model_class.latex_string.isnot(None)).all()
+
+    best_match = None
+    best_similarity = 0.0
+
+    for problem in problems:
+        similarity = calculate_text_similarity(text_string, problem.latex_string)
+        if similarity > best_similarity and similarity >= similarity_threshold:
+            best_similarity = similarity
+            best_match = problem
+
+    if best_match:
+        print(f"Found similar text problem with {best_similarity:.2%} similarity: {best_match.id}")
+
+    return best_match
+
+
 def normalize_latex(latex_string):
     """
     Normalize a LaTeX string for comparison.
@@ -765,11 +897,11 @@ def search_problem_english():
         return jsonify({'uuid': problem.id, 'match_type': 'exact', 'similarity': 1.0})
 
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if latex_string:
-            similar_problem = find_similar_problem(latex_string, EnglishProblem, similarity_threshold=0.85)
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if text_string:
+            similar_problem = find_similar_text_problem(text_string, EnglishProblem, similarity_threshold=0.85)
             if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
                 return jsonify({'uuid': similar_problem.id, 'match_type': 'similar', 'similarity': round(similarity, 4)})
 
     return jsonify({'uuid': None, 'match_type': None, 'similarity': 0.0})
@@ -804,9 +936,9 @@ def create_problem_english():
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
 
-    latex_string = None
+    text_string = None
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
 
     problem_id = str(uuid.uuid4())
     ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
@@ -823,12 +955,12 @@ def create_problem_english():
         solution_latex=solution_latex,
         answer=answer if answer else None,
         feature=feature if feature else None,
-        latex_string=latex_string
+        latex_string=text_string
     )
     db.session.add(problem)
     db.session.commit()
 
-    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'English problem created successfully'}), 201
+    return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'English problem created successfully'}), 201
 
 
 @app.route('/problems_English/<uuid>', methods=['GET'])
@@ -928,11 +1060,11 @@ def search_problem_science():
         return jsonify({'uuid': problem.id, 'match_type': 'exact', 'similarity': 1.0})
 
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if latex_string:
-            similar_problem = find_similar_problem(latex_string, ScienceProblem, similarity_threshold=0.85)
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if text_string:
+            similar_problem = find_similar_text_problem(text_string, ScienceProblem, similarity_threshold=0.85)
             if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
                 return jsonify({'uuid': similar_problem.id, 'match_type': 'similar', 'similarity': round(similarity, 4)})
 
     return jsonify({'uuid': None, 'match_type': None, 'similarity': 0.0})
@@ -967,9 +1099,9 @@ def create_problem_science():
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
 
-    latex_string = None
+    text_string = None
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
 
     problem_id = str(uuid.uuid4())
     ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
@@ -986,12 +1118,12 @@ def create_problem_science():
         solution_latex=solution_latex,
         answer=answer if answer else None,
         feature=feature if feature else None,
-        latex_string=latex_string
+        latex_string=text_string
     )
     db.session.add(problem)
     db.session.commit()
 
-    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Science problem created successfully'}), 201
+    return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Science problem created successfully'}), 201
 
 
 @app.route('/problems_science/<uuid>', methods=['GET'])
@@ -1091,11 +1223,11 @@ def search_problem_social_science():
         return jsonify({'uuid': problem.id, 'match_type': 'exact', 'similarity': 1.0})
 
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if latex_string:
-            similar_problem = find_similar_problem(latex_string, SocialScienceProblem, similarity_threshold=0.85)
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if text_string:
+            similar_problem = find_similar_text_problem(text_string, SocialScienceProblem, similarity_threshold=0.85)
             if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
                 return jsonify({'uuid': similar_problem.id, 'match_type': 'similar', 'similarity': round(similarity, 4)})
 
     return jsonify({'uuid': None, 'match_type': None, 'similarity': 0.0})
@@ -1130,9 +1262,9 @@ def create_problem_social_science():
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
 
-    latex_string = None
+    text_string = None
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
 
     problem_id = str(uuid.uuid4())
     ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
@@ -1149,12 +1281,12 @@ def create_problem_social_science():
         solution_latex=solution_latex,
         answer=answer if answer else None,
         feature=feature if feature else None,
-        latex_string=latex_string
+        latex_string=text_string
     )
     db.session.add(problem)
     db.session.commit()
 
-    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Social science problem created successfully'}), 201
+    return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Social science problem created successfully'}), 201
 
 
 @app.route('/problems_social_science/<uuid>', methods=['GET'])
@@ -1254,11 +1386,11 @@ def search_problem_korean():
         return jsonify({'uuid': problem.id, 'match_type': 'exact', 'similarity': 1.0})
 
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if latex_string:
-            similar_problem = find_similar_problem(latex_string, KoreanProblem, similarity_threshold=0.85)
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if text_string:
+            similar_problem = find_similar_text_problem(text_string, KoreanProblem, similarity_threshold=0.85)
             if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
                 return jsonify({'uuid': similar_problem.id, 'match_type': 'similar', 'similarity': round(similarity, 4)})
 
     return jsonify({'uuid': None, 'match_type': None, 'similarity': 0.0})
@@ -1293,9 +1425,9 @@ def create_problem_korean():
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
 
-    latex_string = None
+    text_string = None
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
 
     problem_id = str(uuid.uuid4())
     ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
@@ -1312,12 +1444,12 @@ def create_problem_korean():
         solution_latex=solution_latex,
         answer=answer if answer else None,
         feature=feature if feature else None,
-        latex_string=latex_string
+        latex_string=text_string
     )
     db.session.add(problem)
     db.session.commit()
 
-    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Korean problem created successfully'}), 201
+    return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Korean problem created successfully'}), 201
 
 
 @app.route('/problems_Korean/<uuid>', methods=['GET'])
@@ -1415,11 +1547,11 @@ def search_problem_english_summary():
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_English_summary/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if latex_string:
-            similar_problem = find_similar_problem(latex_string, EnglishProblemSummary, similarity_threshold=0.85)
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if text_string:
+            similar_problem = find_similar_text_problem(text_string, EnglishProblemSummary, similarity_threshold=0.85)
             if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
                 return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_English_summary/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
@@ -1449,19 +1581,19 @@ def create_problem_english_summary():
     existing = EnglishProblemSummary.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
-    latex_string = None
+    text_string = None
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
     ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
     image_filename = f"{problem_id}.{ext}"
     image_path = os.path.join(app.config['IMAGE_FOLDER_ENGLISH_SUMMARY'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = EnglishProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_English_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = EnglishProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_English_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
-    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'English problem summary created successfully'}), 201
+    return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'English problem summary created successfully'}), 201
 
 
 @app.route('/problems_English_summary/<uuid>', methods=['GET'])
@@ -1532,11 +1664,11 @@ def search_problem_english_deep():
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_English_deep/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if latex_string:
-            similar_problem = find_similar_problem(latex_string, EnglishProblemDeep, similarity_threshold=0.85)
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if text_string:
+            similar_problem = find_similar_text_problem(text_string, EnglishProblemDeep, similarity_threshold=0.85)
             if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
                 return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_English_deep/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
@@ -1566,19 +1698,19 @@ def create_problem_english_deep():
     existing = EnglishProblemDeep.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
-    latex_string = None
+    text_string = None
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
     ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
     image_filename = f"{problem_id}.{ext}"
     image_path = os.path.join(app.config['IMAGE_FOLDER_ENGLISH_DEEP'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = EnglishProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_English_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = EnglishProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_English_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
-    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'English problem deep created successfully'}), 201
+    return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'English problem deep created successfully'}), 201
 
 
 @app.route('/problems_English_deep/<uuid>', methods=['GET'])
@@ -1649,11 +1781,11 @@ def search_problem_science_summary():
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_science_summary/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if latex_string:
-            similar_problem = find_similar_problem(latex_string, ScienceProblemSummary, similarity_threshold=0.85)
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if text_string:
+            similar_problem = find_similar_text_problem(text_string, ScienceProblemSummary, similarity_threshold=0.85)
             if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
                 return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_science_summary/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
@@ -1683,19 +1815,19 @@ def create_problem_science_summary():
     existing = ScienceProblemSummary.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
-    latex_string = None
+    text_string = None
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
     ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
     image_filename = f"{problem_id}.{ext}"
     image_path = os.path.join(app.config['IMAGE_FOLDER_SCIENCE_SUMMARY'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = ScienceProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_science_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = ScienceProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_science_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
-    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Science problem summary created successfully'}), 201
+    return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Science problem summary created successfully'}), 201
 
 
 @app.route('/problems_science_summary/<uuid>', methods=['GET'])
@@ -1766,11 +1898,11 @@ def search_problem_science_deep():
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_science_deep/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if latex_string:
-            similar_problem = find_similar_problem(latex_string, ScienceProblemDeep, similarity_threshold=0.85)
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if text_string:
+            similar_problem = find_similar_text_problem(text_string, ScienceProblemDeep, similarity_threshold=0.85)
             if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
                 return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_science_deep/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
@@ -1800,19 +1932,19 @@ def create_problem_science_deep():
     existing = ScienceProblemDeep.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
-    latex_string = None
+    text_string = None
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
     ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
     image_filename = f"{problem_id}.{ext}"
     image_path = os.path.join(app.config['IMAGE_FOLDER_SCIENCE_DEEP'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = ScienceProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_science_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = ScienceProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_science_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
-    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Science problem deep created successfully'}), 201
+    return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Science problem deep created successfully'}), 201
 
 
 @app.route('/problems_science_deep/<uuid>', methods=['GET'])
@@ -1883,11 +2015,11 @@ def search_problem_social_science_summary():
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_social_science_summary/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if latex_string:
-            similar_problem = find_similar_problem(latex_string, SocialScienceProblemSummary, similarity_threshold=0.85)
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if text_string:
+            similar_problem = find_similar_text_problem(text_string, SocialScienceProblemSummary, similarity_threshold=0.85)
             if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
                 return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_social_science_summary/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
@@ -1917,19 +2049,19 @@ def create_problem_social_science_summary():
     existing = SocialScienceProblemSummary.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
-    latex_string = None
+    text_string = None
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
     ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
     image_filename = f"{problem_id}.{ext}"
     image_path = os.path.join(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE_SUMMARY'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = SocialScienceProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_social_science_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = SocialScienceProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_social_science_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
-    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Social science problem summary created successfully'}), 201
+    return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Social science problem summary created successfully'}), 201
 
 
 @app.route('/problems_social_science_summary/<uuid>', methods=['GET'])
@@ -2000,11 +2132,11 @@ def search_problem_social_science_deep():
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_social_science_deep/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if latex_string:
-            similar_problem = find_similar_problem(latex_string, SocialScienceProblemDeep, similarity_threshold=0.85)
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if text_string:
+            similar_problem = find_similar_text_problem(text_string, SocialScienceProblemDeep, similarity_threshold=0.85)
             if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
                 return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_social_science_deep/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
@@ -2034,19 +2166,19 @@ def create_problem_social_science_deep():
     existing = SocialScienceProblemDeep.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
-    latex_string = None
+    text_string = None
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
     ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
     image_filename = f"{problem_id}.{ext}"
     image_path = os.path.join(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE_DEEP'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = SocialScienceProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_social_science_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = SocialScienceProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_social_science_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
-    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Social science problem deep created successfully'}), 201
+    return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Social science problem deep created successfully'}), 201
 
 
 @app.route('/problems_social_science_deep/<uuid>', methods=['GET'])
@@ -2117,11 +2249,11 @@ def search_problem_korean_summary():
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_Korean_summary/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if latex_string:
-            similar_problem = find_similar_problem(latex_string, KoreanProblemSummary, similarity_threshold=0.85)
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if text_string:
+            similar_problem = find_similar_text_problem(text_string, KoreanProblemSummary, similarity_threshold=0.85)
             if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
                 return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_Korean_summary/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
@@ -2151,19 +2283,19 @@ def create_problem_korean_summary():
     existing = KoreanProblemSummary.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
-    latex_string = None
+    text_string = None
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
     ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
     image_filename = f"{problem_id}.{ext}"
     image_path = os.path.join(app.config['IMAGE_FOLDER_KOREAN_SUMMARY'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = KoreanProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_Korean_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = KoreanProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_Korean_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
-    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Korean problem summary created successfully'}), 201
+    return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Korean problem summary created successfully'}), 201
 
 
 @app.route('/problems_Korean_summary/<uuid>', methods=['GET'])
@@ -2234,11 +2366,11 @@ def search_problem_korean_deep():
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_Korean_deep/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if latex_string:
-            similar_problem = find_similar_problem(latex_string, KoreanProblemDeep, similarity_threshold=0.85)
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
+        if text_string:
+            similar_problem = find_similar_text_problem(text_string, KoreanProblemDeep, similarity_threshold=0.85)
             if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
+                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
                 return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_Korean_deep/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
@@ -2268,19 +2400,19 @@ def create_problem_korean_deep():
     existing = KoreanProblemDeep.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
-    latex_string = None
+    text_string = None
     if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
     ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
     image_filename = f"{problem_id}.{ext}"
     image_path = os.path.join(app.config['IMAGE_FOLDER_KOREAN_DEEP'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = KoreanProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_Korean_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = KoreanProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_Korean_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
-    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Korean problem deep created successfully'}), 201
+    return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Korean problem deep created successfully'}), 201
 
 
 @app.route('/problems_Korean_deep/<uuid>', methods=['GET'])
