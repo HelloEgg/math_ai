@@ -745,35 +745,24 @@ def register_problem_original():
 @app.route('/search_English', methods=['POST'])
 def search_problem_english():
     """
-    Search for an English problem by image URL.
-    Downloads the image, then searches DB by hash and OCR-based fuzzy matching.
+    Search for an English problem by image using OCR-based content matching.
+    Expects: multipart/form-data with 'image' file
     """
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-
-    image_url = data.get('image_url')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
-
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
 
     problem = EnglishProblem.query.filter_by(image_hash=image_hash).first()
     if problem:
-        return jsonify({
-            'uuid': problem.id,
-            'solution_latex': problem.solution_latex,
-            'answer': problem.answer,
-            'feature': problem.feature,
-            'image_url': problem.image_url,
-            'match_type': 'exact',
-            'similarity': 1.0
-        })
+        return jsonify({'uuid': problem.id, 'match_type': 'exact', 'similarity': 1.0})
 
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
@@ -781,68 +770,46 @@ def search_problem_english():
             similar_problem = find_similar_problem(latex_string, EnglishProblem, similarity_threshold=0.85)
             if similar_problem:
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({
-                    'uuid': similar_problem.id,
-                    'solution_latex': similar_problem.solution_latex,
-                    'answer': similar_problem.answer,
-                    'feature': similar_problem.feature,
-                    'image_url': similar_problem.image_url,
-                    'match_type': 'similar',
-                    'similarity': round(similarity, 4)
-                })
+                return jsonify({'uuid': similar_problem.id, 'match_type': 'similar', 'similarity': round(similarity, 4)})
 
-    return jsonify({
-        'uuid': None,
-        'solution_latex': None,
-        'answer': None,
-        'feature': None,
-        'image_url': None,
-        'match_type': None,
-        'similarity': 0.0
-    })
+    return jsonify({'uuid': None, 'match_type': None, 'similarity': 0.0})
 
 
 @app.route('/problems_English', methods=['POST'])
 def create_problem_english():
     """
     Create a new English problem.
-    Expects JSON: {"image_url": "...", "solution_latex": "...", "answer": "...", "feature": "..."}
+    Expects: multipart/form-data with 'image' file and 'solution_latex' field
     """
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
 
-    image_url = data.get('image_url')
-    solution_latex = data.get('solution_latex')
-    answer = data.get('answer')
-    feature = data.get('feature')
-
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-    if not solution_latex or not str(solution_latex).strip():
+    solution_latex = request.form.get('solution_latex')
+    answer = request.form.get('answer')
+    feature = request.form.get('feature')
+    if not solution_latex or not solution_latex.strip():
         return jsonify({'error': 'No solution_latex provided'}), 400
 
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
-
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
 
     existing = EnglishProblem.query.filter_by(image_hash=image_hash).first()
     if existing:
-        return jsonify({
-            'error': 'An English problem with this exact image already exists',
-            'existing_uuid': existing.id
-        }), 409
+        return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
 
     latex_string = None
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
 
     problem_id = str(uuid.uuid4())
-    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
-    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
-        ext = 'png'
+    ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
     image_filename = f"{problem_id}.{ext}"
     image_path = os.path.join(app.config['IMAGE_FOLDER_ENGLISH'], image_filename)
     with open(image_path, 'wb') as f:
@@ -851,21 +818,17 @@ def create_problem_english():
     problem = EnglishProblem(
         id=problem_id,
         image_hash=image_hash,
-        image_url=image_url,
+        image_url=f'/problems_English/{problem_id}/image',
         image_path=image_path,
-        solution_latex=str(solution_latex),
-        answer=str(answer) if answer is not None else None,
-        feature=str(feature) if feature is not None else None,
+        solution_latex=solution_latex,
+        answer=answer if answer else None,
+        feature=feature if feature else None,
         latex_string=latex_string
     )
     db.session.add(problem)
     db.session.commit()
 
-    return jsonify({
-        'uuid': problem.id,
-        'latex_string': latex_string,
-        'message': 'English problem created successfully'
-    }), 201
+    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'English problem created successfully'}), 201
 
 
 @app.route('/problems_English/<uuid>', methods=['GET'])
@@ -945,35 +908,24 @@ def delete_problem_english(uuid):
 @app.route('/search_science', methods=['POST'])
 def search_problem_science():
     """
-    Search for a science problem by image URL.
-    Downloads the image, then searches DB by hash and OCR-based fuzzy matching.
+    Search for a science problem by image using OCR-based content matching.
+    Expects: multipart/form-data with 'image' file
     """
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-
-    image_url = data.get('image_url')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
-
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
 
     problem = ScienceProblem.query.filter_by(image_hash=image_hash).first()
     if problem:
-        return jsonify({
-            'uuid': problem.id,
-            'solution_latex': problem.solution_latex,
-            'answer': problem.answer,
-            'feature': problem.feature,
-            'image_url': problem.image_url,
-            'match_type': 'exact',
-            'similarity': 1.0
-        })
+        return jsonify({'uuid': problem.id, 'match_type': 'exact', 'similarity': 1.0})
 
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
@@ -981,68 +933,46 @@ def search_problem_science():
             similar_problem = find_similar_problem(latex_string, ScienceProblem, similarity_threshold=0.85)
             if similar_problem:
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({
-                    'uuid': similar_problem.id,
-                    'solution_latex': similar_problem.solution_latex,
-                    'answer': similar_problem.answer,
-                    'feature': similar_problem.feature,
-                    'image_url': similar_problem.image_url,
-                    'match_type': 'similar',
-                    'similarity': round(similarity, 4)
-                })
+                return jsonify({'uuid': similar_problem.id, 'match_type': 'similar', 'similarity': round(similarity, 4)})
 
-    return jsonify({
-        'uuid': None,
-        'solution_latex': None,
-        'answer': None,
-        'feature': None,
-        'image_url': None,
-        'match_type': None,
-        'similarity': 0.0
-    })
+    return jsonify({'uuid': None, 'match_type': None, 'similarity': 0.0})
 
 
 @app.route('/problems_science', methods=['POST'])
 def create_problem_science():
     """
     Create a new science problem.
-    Expects JSON: {"image_url": "...", "solution_latex": "...", "answer": "...", "feature": "..."}
+    Expects: multipart/form-data with 'image' file and 'solution_latex' field
     """
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
 
-    image_url = data.get('image_url')
-    solution_latex = data.get('solution_latex')
-    answer = data.get('answer')
-    feature = data.get('feature')
-
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-    if not solution_latex or not str(solution_latex).strip():
+    solution_latex = request.form.get('solution_latex')
+    answer = request.form.get('answer')
+    feature = request.form.get('feature')
+    if not solution_latex or not solution_latex.strip():
         return jsonify({'error': 'No solution_latex provided'}), 400
 
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
-
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
 
     existing = ScienceProblem.query.filter_by(image_hash=image_hash).first()
     if existing:
-        return jsonify({
-            'error': 'A science problem with this exact image already exists',
-            'existing_uuid': existing.id
-        }), 409
+        return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
 
     latex_string = None
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
 
     problem_id = str(uuid.uuid4())
-    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
-    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
-        ext = 'png'
+    ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
     image_filename = f"{problem_id}.{ext}"
     image_path = os.path.join(app.config['IMAGE_FOLDER_SCIENCE'], image_filename)
     with open(image_path, 'wb') as f:
@@ -1051,21 +981,17 @@ def create_problem_science():
     problem = ScienceProblem(
         id=problem_id,
         image_hash=image_hash,
-        image_url=image_url,
+        image_url=f'/problems_science/{problem_id}/image',
         image_path=image_path,
-        solution_latex=str(solution_latex),
-        answer=str(answer) if answer is not None else None,
-        feature=str(feature) if feature is not None else None,
+        solution_latex=solution_latex,
+        answer=answer if answer else None,
+        feature=feature if feature else None,
         latex_string=latex_string
     )
     db.session.add(problem)
     db.session.commit()
 
-    return jsonify({
-        'uuid': problem.id,
-        'latex_string': latex_string,
-        'message': 'Science problem created successfully'
-    }), 201
+    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Science problem created successfully'}), 201
 
 
 @app.route('/problems_science/<uuid>', methods=['GET'])
@@ -1145,35 +1071,24 @@ def delete_problem_science(uuid):
 @app.route('/search_social_science', methods=['POST'])
 def search_problem_social_science():
     """
-    Search for a social science problem by image URL.
-    Downloads the image, then searches DB by hash and OCR-based fuzzy matching.
+    Search for a social science problem by image using OCR-based content matching.
+    Expects: multipart/form-data with 'image' file
     """
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-
-    image_url = data.get('image_url')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
-
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
 
     problem = SocialScienceProblem.query.filter_by(image_hash=image_hash).first()
     if problem:
-        return jsonify({
-            'uuid': problem.id,
-            'solution_latex': problem.solution_latex,
-            'answer': problem.answer,
-            'feature': problem.feature,
-            'image_url': problem.image_url,
-            'match_type': 'exact',
-            'similarity': 1.0
-        })
+        return jsonify({'uuid': problem.id, 'match_type': 'exact', 'similarity': 1.0})
 
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
@@ -1181,68 +1096,46 @@ def search_problem_social_science():
             similar_problem = find_similar_problem(latex_string, SocialScienceProblem, similarity_threshold=0.85)
             if similar_problem:
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({
-                    'uuid': similar_problem.id,
-                    'solution_latex': similar_problem.solution_latex,
-                    'answer': similar_problem.answer,
-                    'feature': similar_problem.feature,
-                    'image_url': similar_problem.image_url,
-                    'match_type': 'similar',
-                    'similarity': round(similarity, 4)
-                })
+                return jsonify({'uuid': similar_problem.id, 'match_type': 'similar', 'similarity': round(similarity, 4)})
 
-    return jsonify({
-        'uuid': None,
-        'solution_latex': None,
-        'answer': None,
-        'feature': None,
-        'image_url': None,
-        'match_type': None,
-        'similarity': 0.0
-    })
+    return jsonify({'uuid': None, 'match_type': None, 'similarity': 0.0})
 
 
 @app.route('/problems_social_science', methods=['POST'])
 def create_problem_social_science():
     """
     Create a new social science problem.
-    Expects JSON: {"image_url": "...", "solution_latex": "...", "answer": "...", "feature": "..."}
+    Expects: multipart/form-data with 'image' file and 'solution_latex' field
     """
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
 
-    image_url = data.get('image_url')
-    solution_latex = data.get('solution_latex')
-    answer = data.get('answer')
-    feature = data.get('feature')
-
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-    if not solution_latex or not str(solution_latex).strip():
+    solution_latex = request.form.get('solution_latex')
+    answer = request.form.get('answer')
+    feature = request.form.get('feature')
+    if not solution_latex or not solution_latex.strip():
         return jsonify({'error': 'No solution_latex provided'}), 400
 
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
-
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
 
     existing = SocialScienceProblem.query.filter_by(image_hash=image_hash).first()
     if existing:
-        return jsonify({
-            'error': 'A social science problem with this exact image already exists',
-            'existing_uuid': existing.id
-        }), 409
+        return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
 
     latex_string = None
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
 
     problem_id = str(uuid.uuid4())
-    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
-    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
-        ext = 'png'
+    ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
     image_filename = f"{problem_id}.{ext}"
     image_path = os.path.join(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE'], image_filename)
     with open(image_path, 'wb') as f:
@@ -1251,21 +1144,17 @@ def create_problem_social_science():
     problem = SocialScienceProblem(
         id=problem_id,
         image_hash=image_hash,
-        image_url=image_url,
+        image_url=f'/problems_social_science/{problem_id}/image',
         image_path=image_path,
-        solution_latex=str(solution_latex),
-        answer=str(answer) if answer is not None else None,
-        feature=str(feature) if feature is not None else None,
+        solution_latex=solution_latex,
+        answer=answer if answer else None,
+        feature=feature if feature else None,
         latex_string=latex_string
     )
     db.session.add(problem)
     db.session.commit()
 
-    return jsonify({
-        'uuid': problem.id,
-        'latex_string': latex_string,
-        'message': 'Social science problem created successfully'
-    }), 201
+    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Social science problem created successfully'}), 201
 
 
 @app.route('/problems_social_science/<uuid>', methods=['GET'])
@@ -1345,35 +1234,24 @@ def delete_problem_social_science(uuid):
 @app.route('/search_Korean', methods=['POST'])
 def search_problem_korean():
     """
-    Search for a Korean problem by image URL.
-    Downloads the image, then searches DB by hash and OCR-based fuzzy matching.
+    Search for a Korean problem by image using OCR-based content matching.
+    Expects: multipart/form-data with 'image' file
     """
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-
-    image_url = data.get('image_url')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
-
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
 
     problem = KoreanProblem.query.filter_by(image_hash=image_hash).first()
     if problem:
-        return jsonify({
-            'uuid': problem.id,
-            'solution_latex': problem.solution_latex,
-            'answer': problem.answer,
-            'feature': problem.feature,
-            'image_url': problem.image_url,
-            'match_type': 'exact',
-            'similarity': 1.0
-        })
+        return jsonify({'uuid': problem.id, 'match_type': 'exact', 'similarity': 1.0})
 
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
@@ -1381,68 +1259,46 @@ def search_problem_korean():
             similar_problem = find_similar_problem(latex_string, KoreanProblem, similarity_threshold=0.85)
             if similar_problem:
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({
-                    'uuid': similar_problem.id,
-                    'solution_latex': similar_problem.solution_latex,
-                    'answer': similar_problem.answer,
-                    'feature': similar_problem.feature,
-                    'image_url': similar_problem.image_url,
-                    'match_type': 'similar',
-                    'similarity': round(similarity, 4)
-                })
+                return jsonify({'uuid': similar_problem.id, 'match_type': 'similar', 'similarity': round(similarity, 4)})
 
-    return jsonify({
-        'uuid': None,
-        'solution_latex': None,
-        'answer': None,
-        'feature': None,
-        'image_url': None,
-        'match_type': None,
-        'similarity': 0.0
-    })
+    return jsonify({'uuid': None, 'match_type': None, 'similarity': 0.0})
 
 
 @app.route('/problems_Korean', methods=['POST'])
 def create_problem_korean():
     """
     Create a new Korean problem.
-    Expects JSON: {"image_url": "...", "solution_latex": "...", "answer": "...", "feature": "..."}
+    Expects: multipart/form-data with 'image' file and 'solution_latex' field
     """
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
 
-    image_url = data.get('image_url')
-    solution_latex = data.get('solution_latex')
-    answer = data.get('answer')
-    feature = data.get('feature')
-
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-    if not solution_latex or not str(solution_latex).strip():
+    solution_latex = request.form.get('solution_latex')
+    answer = request.form.get('answer')
+    feature = request.form.get('feature')
+    if not solution_latex or not solution_latex.strip():
         return jsonify({'error': 'No solution_latex provided'}), 400
 
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
-
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
 
     existing = KoreanProblem.query.filter_by(image_hash=image_hash).first()
     if existing:
-        return jsonify({
-            'error': 'A Korean problem with this exact image already exists',
-            'existing_uuid': existing.id
-        }), 409
+        return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
 
     latex_string = None
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
 
     problem_id = str(uuid.uuid4())
-    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
-    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
-        ext = 'png'
+    ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
     image_filename = f"{problem_id}.{ext}"
     image_path = os.path.join(app.config['IMAGE_FOLDER_KOREAN'], image_filename)
     with open(image_path, 'wb') as f:
@@ -1451,21 +1307,17 @@ def create_problem_korean():
     problem = KoreanProblem(
         id=problem_id,
         image_hash=image_hash,
-        image_url=image_url,
+        image_url=f'/problems_Korean/{problem_id}/image',
         image_path=image_path,
-        solution_latex=str(solution_latex),
-        answer=str(answer) if answer is not None else None,
-        feature=str(feature) if feature is not None else None,
+        solution_latex=solution_latex,
+        answer=answer if answer else None,
+        feature=feature if feature else None,
         latex_string=latex_string
     )
     db.session.add(problem)
     db.session.commit()
 
-    return jsonify({
-        'uuid': problem.id,
-        'latex_string': latex_string,
-        'message': 'Korean problem created successfully'
-    }), 201
+    return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Korean problem created successfully'}), 201
 
 
 @app.route('/problems_Korean/<uuid>', methods=['GET'])
@@ -1544,48 +1396,55 @@ def delete_problem_korean(uuid):
 
 @app.route('/search_English_summary', methods=['POST'])
 def search_problem_english_summary():
-    """Search for an English problem summary by image URL."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    """
+    Search for an English problem summary by image using OCR-based content matching.
+    Expects: multipart/form-data with 'image' file
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     problem = EnglishProblemSummary.query.filter_by(image_hash=image_hash).first()
     if problem:
-        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': problem.image_url, 'match_type': 'exact', 'similarity': 1.0})
+        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_English_summary/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
         if latex_string:
             similar_problem = find_similar_problem(latex_string, EnglishProblemSummary, similarity_threshold=0.85)
             if similar_problem:
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': similar_problem.image_url, 'match_type': 'similar', 'similarity': round(similarity, 4)})
+                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_English_summary/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
 @app.route('/problems_English_summary', methods=['POST'])
 def create_problem_english_summary():
-    """Create a new English problem summary."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    solution_latex = data.get('solution_latex')
-    answer = data.get('answer')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
+    """
+    Create a new English problem summary.
+    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    solution_latex = request.form.get('solution_latex')
+    answer = request.form.get('answer')
+    feature = request.form.get('feature')
     if not solution_latex or not str(solution_latex).strip():
         return jsonify({'error': 'No solution_latex provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     existing = EnglishProblemSummary.query.filter_by(image_hash=image_hash).first()
     if existing:
@@ -1594,13 +1453,12 @@ def create_problem_english_summary():
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
-    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
-    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
-        ext = 'png'
-    image_path = os.path.join(app.config['IMAGE_FOLDER_ENGLISH_SUMMARY'], f"{problem_id}.{ext}")
+    ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
+    image_filename = f"{problem_id}.{ext}"
+    image_path = os.path.join(app.config['IMAGE_FOLDER_ENGLISH_SUMMARY'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = EnglishProblemSummary(id=problem_id, image_hash=image_hash, image_url=image_url, image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = EnglishProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_English_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'English problem summary created successfully'}), 201
@@ -1655,48 +1513,55 @@ def delete_problem_english_summary(uuid):
 
 @app.route('/search_English_deep', methods=['POST'])
 def search_problem_english_deep():
-    """Search for an English problem deep by image URL."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    """
+    Search for an English problem deep by image using OCR-based content matching.
+    Expects: multipart/form-data with 'image' file
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     problem = EnglishProblemDeep.query.filter_by(image_hash=image_hash).first()
     if problem:
-        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': problem.image_url, 'match_type': 'exact', 'similarity': 1.0})
+        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_English_deep/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
         if latex_string:
             similar_problem = find_similar_problem(latex_string, EnglishProblemDeep, similarity_threshold=0.85)
             if similar_problem:
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': similar_problem.image_url, 'match_type': 'similar', 'similarity': round(similarity, 4)})
+                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_English_deep/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
 @app.route('/problems_English_deep', methods=['POST'])
 def create_problem_english_deep():
-    """Create a new English problem deep."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    solution_latex = data.get('solution_latex')
-    answer = data.get('answer')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
+    """
+    Create a new English problem deep.
+    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    solution_latex = request.form.get('solution_latex')
+    answer = request.form.get('answer')
+    feature = request.form.get('feature')
     if not solution_latex or not str(solution_latex).strip():
         return jsonify({'error': 'No solution_latex provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     existing = EnglishProblemDeep.query.filter_by(image_hash=image_hash).first()
     if existing:
@@ -1705,13 +1570,12 @@ def create_problem_english_deep():
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
-    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
-    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
-        ext = 'png'
-    image_path = os.path.join(app.config['IMAGE_FOLDER_ENGLISH_DEEP'], f"{problem_id}.{ext}")
+    ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
+    image_filename = f"{problem_id}.{ext}"
+    image_path = os.path.join(app.config['IMAGE_FOLDER_ENGLISH_DEEP'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = EnglishProblemDeep(id=problem_id, image_hash=image_hash, image_url=image_url, image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = EnglishProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_English_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'English problem deep created successfully'}), 201
@@ -1766,48 +1630,55 @@ def delete_problem_english_deep(uuid):
 
 @app.route('/search_science_summary', methods=['POST'])
 def search_problem_science_summary():
-    """Search for a science problem summary by image URL."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    """
+    Search for a science problem summary by image using OCR-based content matching.
+    Expects: multipart/form-data with 'image' file
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     problem = ScienceProblemSummary.query.filter_by(image_hash=image_hash).first()
     if problem:
-        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': problem.image_url, 'match_type': 'exact', 'similarity': 1.0})
+        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_science_summary/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
         if latex_string:
             similar_problem = find_similar_problem(latex_string, ScienceProblemSummary, similarity_threshold=0.85)
             if similar_problem:
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': similar_problem.image_url, 'match_type': 'similar', 'similarity': round(similarity, 4)})
+                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_science_summary/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
 @app.route('/problems_science_summary', methods=['POST'])
 def create_problem_science_summary():
-    """Create a new science problem summary."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    solution_latex = data.get('solution_latex')
-    answer = data.get('answer')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
+    """
+    Create a new science problem summary.
+    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    solution_latex = request.form.get('solution_latex')
+    answer = request.form.get('answer')
+    feature = request.form.get('feature')
     if not solution_latex or not str(solution_latex).strip():
         return jsonify({'error': 'No solution_latex provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     existing = ScienceProblemSummary.query.filter_by(image_hash=image_hash).first()
     if existing:
@@ -1816,13 +1687,12 @@ def create_problem_science_summary():
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
-    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
-    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
-        ext = 'png'
-    image_path = os.path.join(app.config['IMAGE_FOLDER_SCIENCE_SUMMARY'], f"{problem_id}.{ext}")
+    ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
+    image_filename = f"{problem_id}.{ext}"
+    image_path = os.path.join(app.config['IMAGE_FOLDER_SCIENCE_SUMMARY'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = ScienceProblemSummary(id=problem_id, image_hash=image_hash, image_url=image_url, image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = ScienceProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_science_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Science problem summary created successfully'}), 201
@@ -1877,48 +1747,55 @@ def delete_problem_science_summary(uuid):
 
 @app.route('/search_science_deep', methods=['POST'])
 def search_problem_science_deep():
-    """Search for a science problem deep by image URL."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    """
+    Search for a science problem deep by image using OCR-based content matching.
+    Expects: multipart/form-data with 'image' file
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     problem = ScienceProblemDeep.query.filter_by(image_hash=image_hash).first()
     if problem:
-        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': problem.image_url, 'match_type': 'exact', 'similarity': 1.0})
+        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_science_deep/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
         if latex_string:
             similar_problem = find_similar_problem(latex_string, ScienceProblemDeep, similarity_threshold=0.85)
             if similar_problem:
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': similar_problem.image_url, 'match_type': 'similar', 'similarity': round(similarity, 4)})
+                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_science_deep/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
 @app.route('/problems_science_deep', methods=['POST'])
 def create_problem_science_deep():
-    """Create a new science problem deep."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    solution_latex = data.get('solution_latex')
-    answer = data.get('answer')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
+    """
+    Create a new science problem deep.
+    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    solution_latex = request.form.get('solution_latex')
+    answer = request.form.get('answer')
+    feature = request.form.get('feature')
     if not solution_latex or not str(solution_latex).strip():
         return jsonify({'error': 'No solution_latex provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     existing = ScienceProblemDeep.query.filter_by(image_hash=image_hash).first()
     if existing:
@@ -1927,13 +1804,12 @@ def create_problem_science_deep():
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
-    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
-    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
-        ext = 'png'
-    image_path = os.path.join(app.config['IMAGE_FOLDER_SCIENCE_DEEP'], f"{problem_id}.{ext}")
+    ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
+    image_filename = f"{problem_id}.{ext}"
+    image_path = os.path.join(app.config['IMAGE_FOLDER_SCIENCE_DEEP'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = ScienceProblemDeep(id=problem_id, image_hash=image_hash, image_url=image_url, image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = ScienceProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_science_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Science problem deep created successfully'}), 201
@@ -1988,48 +1864,55 @@ def delete_problem_science_deep(uuid):
 
 @app.route('/search_social_science_summary', methods=['POST'])
 def search_problem_social_science_summary():
-    """Search for a social science problem summary by image URL."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    """
+    Search for a social science problem summary by image using OCR-based content matching.
+    Expects: multipart/form-data with 'image' file
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     problem = SocialScienceProblemSummary.query.filter_by(image_hash=image_hash).first()
     if problem:
-        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': problem.image_url, 'match_type': 'exact', 'similarity': 1.0})
+        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_social_science_summary/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
         if latex_string:
             similar_problem = find_similar_problem(latex_string, SocialScienceProblemSummary, similarity_threshold=0.85)
             if similar_problem:
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': similar_problem.image_url, 'match_type': 'similar', 'similarity': round(similarity, 4)})
+                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_social_science_summary/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
 @app.route('/problems_social_science_summary', methods=['POST'])
 def create_problem_social_science_summary():
-    """Create a new social science problem summary."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    solution_latex = data.get('solution_latex')
-    answer = data.get('answer')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
+    """
+    Create a new social science problem summary.
+    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    solution_latex = request.form.get('solution_latex')
+    answer = request.form.get('answer')
+    feature = request.form.get('feature')
     if not solution_latex or not str(solution_latex).strip():
         return jsonify({'error': 'No solution_latex provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     existing = SocialScienceProblemSummary.query.filter_by(image_hash=image_hash).first()
     if existing:
@@ -2038,13 +1921,12 @@ def create_problem_social_science_summary():
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
-    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
-    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
-        ext = 'png'
-    image_path = os.path.join(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE_SUMMARY'], f"{problem_id}.{ext}")
+    ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
+    image_filename = f"{problem_id}.{ext}"
+    image_path = os.path.join(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE_SUMMARY'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = SocialScienceProblemSummary(id=problem_id, image_hash=image_hash, image_url=image_url, image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = SocialScienceProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_social_science_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Social science problem summary created successfully'}), 201
@@ -2099,48 +1981,55 @@ def delete_problem_social_science_summary(uuid):
 
 @app.route('/search_social_science_deep', methods=['POST'])
 def search_problem_social_science_deep():
-    """Search for a social science problem deep by image URL."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    """
+    Search for a social science problem deep by image using OCR-based content matching.
+    Expects: multipart/form-data with 'image' file
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     problem = SocialScienceProblemDeep.query.filter_by(image_hash=image_hash).first()
     if problem:
-        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': problem.image_url, 'match_type': 'exact', 'similarity': 1.0})
+        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_social_science_deep/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
         if latex_string:
             similar_problem = find_similar_problem(latex_string, SocialScienceProblemDeep, similarity_threshold=0.85)
             if similar_problem:
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': similar_problem.image_url, 'match_type': 'similar', 'similarity': round(similarity, 4)})
+                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_social_science_deep/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
 @app.route('/problems_social_science_deep', methods=['POST'])
 def create_problem_social_science_deep():
-    """Create a new social science problem deep."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    solution_latex = data.get('solution_latex')
-    answer = data.get('answer')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
+    """
+    Create a new social science problem deep.
+    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    solution_latex = request.form.get('solution_latex')
+    answer = request.form.get('answer')
+    feature = request.form.get('feature')
     if not solution_latex or not str(solution_latex).strip():
         return jsonify({'error': 'No solution_latex provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     existing = SocialScienceProblemDeep.query.filter_by(image_hash=image_hash).first()
     if existing:
@@ -2149,13 +2038,12 @@ def create_problem_social_science_deep():
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
-    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
-    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
-        ext = 'png'
-    image_path = os.path.join(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE_DEEP'], f"{problem_id}.{ext}")
+    ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
+    image_filename = f"{problem_id}.{ext}"
+    image_path = os.path.join(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE_DEEP'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = SocialScienceProblemDeep(id=problem_id, image_hash=image_hash, image_url=image_url, image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = SocialScienceProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_social_science_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Social science problem deep created successfully'}), 201
@@ -2210,48 +2098,55 @@ def delete_problem_social_science_deep(uuid):
 
 @app.route('/search_Korean_summary', methods=['POST'])
 def search_problem_korean_summary():
-    """Search for a Korean problem summary by image URL."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    """
+    Search for a Korean problem summary by image using OCR-based content matching.
+    Expects: multipart/form-data with 'image' file
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     problem = KoreanProblemSummary.query.filter_by(image_hash=image_hash).first()
     if problem:
-        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': problem.image_url, 'match_type': 'exact', 'similarity': 1.0})
+        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_Korean_summary/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
         if latex_string:
             similar_problem = find_similar_problem(latex_string, KoreanProblemSummary, similarity_threshold=0.85)
             if similar_problem:
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': similar_problem.image_url, 'match_type': 'similar', 'similarity': round(similarity, 4)})
+                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_Korean_summary/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
 @app.route('/problems_Korean_summary', methods=['POST'])
 def create_problem_korean_summary():
-    """Create a new Korean problem summary."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    solution_latex = data.get('solution_latex')
-    answer = data.get('answer')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
+    """
+    Create a new Korean problem summary.
+    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    solution_latex = request.form.get('solution_latex')
+    answer = request.form.get('answer')
+    feature = request.form.get('feature')
     if not solution_latex or not str(solution_latex).strip():
         return jsonify({'error': 'No solution_latex provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     existing = KoreanProblemSummary.query.filter_by(image_hash=image_hash).first()
     if existing:
@@ -2260,13 +2155,12 @@ def create_problem_korean_summary():
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
-    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
-    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
-        ext = 'png'
-    image_path = os.path.join(app.config['IMAGE_FOLDER_KOREAN_SUMMARY'], f"{problem_id}.{ext}")
+    ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
+    image_filename = f"{problem_id}.{ext}"
+    image_path = os.path.join(app.config['IMAGE_FOLDER_KOREAN_SUMMARY'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = KoreanProblemSummary(id=problem_id, image_hash=image_hash, image_url=image_url, image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = KoreanProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_Korean_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Korean problem summary created successfully'}), 201
@@ -2321,48 +2215,55 @@ def delete_problem_korean_summary(uuid):
 
 @app.route('/search_Korean_deep', methods=['POST'])
 def search_problem_korean_deep():
-    """Search for a Korean problem deep by image URL."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    """
+    Search for a Korean problem deep by image using OCR-based content matching.
+    Expects: multipart/form-data with 'image' file
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     problem = KoreanProblemDeep.query.filter_by(image_hash=image_hash).first()
     if problem:
-        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': problem.image_url, 'match_type': 'exact', 'similarity': 1.0})
+        return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_Korean_deep/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
         if latex_string:
             similar_problem = find_similar_problem(latex_string, KoreanProblemDeep, similarity_threshold=0.85)
             if similar_problem:
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': similar_problem.image_url, 'match_type': 'similar', 'similarity': round(similarity, 4)})
+                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_Korean_deep/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
 @app.route('/problems_Korean_deep', methods=['POST'])
 def create_problem_korean_deep():
-    """Create a new Korean problem deep."""
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'No JSON data provided'}), 400
-    image_url = data.get('image_url')
-    solution_latex = data.get('solution_latex')
-    answer = data.get('answer')
-    feature = data.get('feature')
-    if not image_url:
-        return jsonify({'error': 'No image_url provided'}), 400
+    """
+    Create a new Korean problem deep.
+    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    image_file = request.files['image']
+    if image_file.filename == '':
+        return jsonify({'error': 'No image file selected'}), 400
+    if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
+        return jsonify({'error': 'Invalid image file type'}), 400
+    solution_latex = request.form.get('solution_latex')
+    answer = request.form.get('answer')
+    feature = request.form.get('feature')
     if not solution_latex or not str(solution_latex).strip():
         return jsonify({'error': 'No solution_latex provided'}), 400
-    image_data = download_image_from_url(image_url)
-    if not image_data:
-        return jsonify({'error': 'Failed to download image from URL'}), 400
+    image_data = image_file.read()
+    if len(image_data) > app.config['MAX_IMAGE_SIZE']:
+        return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
     existing = KoreanProblemDeep.query.filter_by(image_hash=image_hash).first()
     if existing:
@@ -2371,13 +2272,12 @@ def create_problem_korean_deep():
     if app.config.get('GEMINI_API_KEY'):
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
     problem_id = str(uuid.uuid4())
-    ext = image_url.rsplit('.', 1)[-1].lower().split('?')[0] if '.' in image_url else 'png'
-    if ext not in {'png', 'jpg', 'jpeg', 'gif', 'webp'}:
-        ext = 'png'
-    image_path = os.path.join(app.config['IMAGE_FOLDER_KOREAN_DEEP'], f"{problem_id}.{ext}")
+    ext = image_file.filename.rsplit('.', 1)[-1].lower() if '.' in image_file.filename else 'png'
+    image_filename = f"{problem_id}.{ext}"
+    image_path = os.path.join(app.config['IMAGE_FOLDER_KOREAN_DEEP'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = KoreanProblemDeep(id=problem_id, image_hash=image_hash, image_url=image_url, image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
+    problem = KoreanProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_Korean_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=latex_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'latex_string': latex_string, 'message': 'Korean problem deep created successfully'}), 201
