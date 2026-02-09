@@ -55,18 +55,30 @@ def create_app(config_class=Config):
     os.makedirs(app.config['IMAGE_FOLDER_ENGLISH'], exist_ok=True)
     os.makedirs(app.config['IMAGE_FOLDER_ENGLISH_SUMMARY'], exist_ok=True)
     os.makedirs(app.config['IMAGE_FOLDER_ENGLISH_DEEP'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_ENGLISH'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_ENGLISH_SUMMARY'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_ENGLISH_DEEP'], exist_ok=True)
     # Create upload directories - Science (base, summary, deep)
     os.makedirs(app.config['IMAGE_FOLDER_SCIENCE'], exist_ok=True)
     os.makedirs(app.config['IMAGE_FOLDER_SCIENCE_SUMMARY'], exist_ok=True)
     os.makedirs(app.config['IMAGE_FOLDER_SCIENCE_DEEP'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_SCIENCE'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_SCIENCE_SUMMARY'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_SCIENCE_DEEP'], exist_ok=True)
     # Create upload directories - Social Science (base, summary, deep)
     os.makedirs(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE'], exist_ok=True)
     os.makedirs(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE_SUMMARY'], exist_ok=True)
     os.makedirs(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE_DEEP'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_SOCIAL_SCIENCE'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_SOCIAL_SCIENCE_SUMMARY'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_SOCIAL_SCIENCE_DEEP'], exist_ok=True)
     # Create upload directories - Korean (base, summary, deep)
     os.makedirs(app.config['IMAGE_FOLDER_KOREAN'], exist_ok=True)
     os.makedirs(app.config['IMAGE_FOLDER_KOREAN_SUMMARY'], exist_ok=True)
     os.makedirs(app.config['IMAGE_FOLDER_KOREAN_DEEP'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_KOREAN'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_KOREAN_SUMMARY'], exist_ok=True)
+    os.makedirs(app.config['AUDIO_FOLDER_KOREAN_DEEP'], exist_ok=True)
     # Create upload directories - Math Twin
     os.makedirs(app.config['IMAGE_FOLDER_TWIN'], exist_ok=True)
 
@@ -126,6 +138,27 @@ def migrate_add_latex_string_column(app):
                     except Exception as e:
                         db.session.rollback()
                         print(f"  Warning: Could not add {col_name} column: {e}")
+
+        # audio_path column for subject tables
+        tables_for_audio = [
+            'english_problems', 'english_problems_summary', 'english_problems_deep',
+            'science_problems', 'science_problems_summary', 'science_problems_deep',
+            'social_science_problems', 'social_science_problems_summary', 'social_science_problems_deep',
+            'korean_problems', 'korean_problems_summary', 'korean_problems_deep',
+        ]
+        for table_name in tables_for_audio:
+            if table_name not in inspector.get_table_names():
+                continue
+            columns = [col['name'] for col in inspector.get_columns(table_name)]
+            if 'audio_path' not in columns:
+                print(f"Migrating {table_name}: adding audio_path column...")
+                try:
+                    db.session.execute(text(f'ALTER TABLE {table_name} ADD COLUMN audio_path VARCHAR(512)'))
+                    db.session.commit()
+                    print(f"  Successfully added audio_path column to {table_name}")
+                except Exception as e:
+                    db.session.rollback()
+                    print(f"  Warning: Could not add audio_path column to {table_name}: {e}")
 
 
 app = create_app()
@@ -911,15 +944,22 @@ def search_problem_english():
 def create_problem_english():
     """
     Create a new English problem.
-    Expects: multipart/form-data with 'image' file and 'solution_latex' field
+    Expects: multipart/form-data with 'image' file, 'audio' file, and 'solution_latex' field
     """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
     image_file = request.files['image']
+    audio_file = request.files['audio']
     if image_file.filename == '':
         return jsonify({'error': 'No image file selected'}), 400
     if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
         return jsonify({'error': 'Invalid image file type'}), 400
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
 
     solution_latex = request.form.get('solution_latex')
     answer = request.form.get('answer')
@@ -931,6 +971,10 @@ def create_problem_english():
     if len(image_data) > app.config['MAX_IMAGE_SIZE']:
         return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
+
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
 
     existing = EnglishProblem.query.filter_by(image_hash=image_hash).first()
     if existing:
@@ -947,12 +991,16 @@ def create_problem_english():
     with open(image_path, 'wb') as f:
         f.write(image_data)
 
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_ENGLISH'], problem_id)
+
     problem = EnglishProblem(
         id=problem_id,
         image_hash=image_hash,
         image_url=f'/problems_English/{problem_id}/image',
         image_path=image_path,
         solution_latex=solution_latex,
+        audio_path=audio_path,
         answer=answer if answer else None,
         feature=feature if feature else None,
         latex_string=text_string
@@ -975,9 +1023,21 @@ def get_problem_english(uuid):
         'solution_latex': problem.solution_latex,
         'answer': problem.answer,
         'feature': problem.feature,
+        'audio_url': f'/problems_English/{problem.id}/audio',
         'image_url': f'/problems_English/{problem.id}/image',
         'created_at': problem.created_at.isoformat() if problem.created_at else None
     })
+
+
+@app.route('/problems_English/<uuid>/audio', methods=['GET'])
+def get_problem_english_audio(uuid):
+    """Get the audio file for an English problem."""
+    problem = EnglishProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.audio_path or not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+    return send_file(problem.audio_path, as_attachment=False)
 
 
 @app.route('/problems_English/<uuid>/image', methods=['GET'])
@@ -1026,6 +1086,8 @@ def delete_problem_english(uuid):
 
     if problem.image_path and os.path.exists(problem.image_path):
         os.remove(problem.image_path)
+    if problem.audio_path and os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
 
     db.session.delete(problem)
     db.session.commit()
@@ -1074,15 +1136,22 @@ def search_problem_science():
 def create_problem_science():
     """
     Create a new science problem.
-    Expects: multipart/form-data with 'image' file and 'solution_latex' field
+    Expects: multipart/form-data with 'image' file, 'audio' file, and 'solution_latex' field
     """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
     image_file = request.files['image']
+    audio_file = request.files['audio']
     if image_file.filename == '':
         return jsonify({'error': 'No image file selected'}), 400
     if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
         return jsonify({'error': 'Invalid image file type'}), 400
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
 
     solution_latex = request.form.get('solution_latex')
     answer = request.form.get('answer')
@@ -1094,6 +1163,10 @@ def create_problem_science():
     if len(image_data) > app.config['MAX_IMAGE_SIZE']:
         return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
+
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
 
     existing = ScienceProblem.query.filter_by(image_hash=image_hash).first()
     if existing:
@@ -1110,12 +1183,16 @@ def create_problem_science():
     with open(image_path, 'wb') as f:
         f.write(image_data)
 
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_SCIENCE'], problem_id)
+
     problem = ScienceProblem(
         id=problem_id,
         image_hash=image_hash,
         image_url=f'/problems_science/{problem_id}/image',
         image_path=image_path,
         solution_latex=solution_latex,
+        audio_path=audio_path,
         answer=answer if answer else None,
         feature=feature if feature else None,
         latex_string=text_string
@@ -1138,9 +1215,21 @@ def get_problem_science(uuid):
         'solution_latex': problem.solution_latex,
         'answer': problem.answer,
         'feature': problem.feature,
+        'audio_url': f'/problems_science/{problem.id}/audio',
         'image_url': f'/problems_science/{problem.id}/image',
         'created_at': problem.created_at.isoformat() if problem.created_at else None
     })
+
+
+@app.route('/problems_science/<uuid>/audio', methods=['GET'])
+def get_problem_science_audio(uuid):
+    """Get the audio file for a science problem."""
+    problem = ScienceProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.audio_path or not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+    return send_file(problem.audio_path, as_attachment=False)
 
 
 @app.route('/problems_science/<uuid>/image', methods=['GET'])
@@ -1189,6 +1278,8 @@ def delete_problem_science(uuid):
 
     if problem.image_path and os.path.exists(problem.image_path):
         os.remove(problem.image_path)
+    if problem.audio_path and os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
 
     db.session.delete(problem)
     db.session.commit()
@@ -1237,15 +1328,22 @@ def search_problem_social_science():
 def create_problem_social_science():
     """
     Create a new social science problem.
-    Expects: multipart/form-data with 'image' file and 'solution_latex' field
+    Expects: multipart/form-data with 'image' file, 'audio' file, and 'solution_latex' field
     """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
     image_file = request.files['image']
+    audio_file = request.files['audio']
     if image_file.filename == '':
         return jsonify({'error': 'No image file selected'}), 400
     if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
         return jsonify({'error': 'Invalid image file type'}), 400
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
 
     solution_latex = request.form.get('solution_latex')
     answer = request.form.get('answer')
@@ -1257,6 +1355,10 @@ def create_problem_social_science():
     if len(image_data) > app.config['MAX_IMAGE_SIZE']:
         return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
+
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
 
     existing = SocialScienceProblem.query.filter_by(image_hash=image_hash).first()
     if existing:
@@ -1273,12 +1375,16 @@ def create_problem_social_science():
     with open(image_path, 'wb') as f:
         f.write(image_data)
 
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_SOCIAL_SCIENCE'], problem_id)
+
     problem = SocialScienceProblem(
         id=problem_id,
         image_hash=image_hash,
         image_url=f'/problems_social_science/{problem_id}/image',
         image_path=image_path,
         solution_latex=solution_latex,
+        audio_path=audio_path,
         answer=answer if answer else None,
         feature=feature if feature else None,
         latex_string=text_string
@@ -1301,9 +1407,21 @@ def get_problem_social_science(uuid):
         'solution_latex': problem.solution_latex,
         'answer': problem.answer,
         'feature': problem.feature,
+        'audio_url': f'/problems_social_science/{problem.id}/audio',
         'image_url': f'/problems_social_science/{problem.id}/image',
         'created_at': problem.created_at.isoformat() if problem.created_at else None
     })
+
+
+@app.route('/problems_social_science/<uuid>/audio', methods=['GET'])
+def get_problem_social_science_audio(uuid):
+    """Get the audio file for a social science problem."""
+    problem = SocialScienceProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.audio_path or not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+    return send_file(problem.audio_path, as_attachment=False)
 
 
 @app.route('/problems_social_science/<uuid>/image', methods=['GET'])
@@ -1352,6 +1470,8 @@ def delete_problem_social_science(uuid):
 
     if problem.image_path and os.path.exists(problem.image_path):
         os.remove(problem.image_path)
+    if problem.audio_path and os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
 
     db.session.delete(problem)
     db.session.commit()
@@ -1400,15 +1520,22 @@ def search_problem_korean():
 def create_problem_korean():
     """
     Create a new Korean problem.
-    Expects: multipart/form-data with 'image' file and 'solution_latex' field
+    Expects: multipart/form-data with 'image' file, 'audio' file, and 'solution_latex' field
     """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
     image_file = request.files['image']
+    audio_file = request.files['audio']
     if image_file.filename == '':
         return jsonify({'error': 'No image file selected'}), 400
     if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
         return jsonify({'error': 'Invalid image file type'}), 400
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
 
     solution_latex = request.form.get('solution_latex')
     answer = request.form.get('answer')
@@ -1420,6 +1547,10 @@ def create_problem_korean():
     if len(image_data) > app.config['MAX_IMAGE_SIZE']:
         return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
+
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
 
     existing = KoreanProblem.query.filter_by(image_hash=image_hash).first()
     if existing:
@@ -1436,12 +1567,16 @@ def create_problem_korean():
     with open(image_path, 'wb') as f:
         f.write(image_data)
 
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_KOREAN'], problem_id)
+
     problem = KoreanProblem(
         id=problem_id,
         image_hash=image_hash,
         image_url=f'/problems_Korean/{problem_id}/image',
         image_path=image_path,
         solution_latex=solution_latex,
+        audio_path=audio_path,
         answer=answer if answer else None,
         feature=feature if feature else None,
         latex_string=text_string
@@ -1464,9 +1599,21 @@ def get_problem_korean(uuid):
         'solution_latex': problem.solution_latex,
         'answer': problem.answer,
         'feature': problem.feature,
+        'audio_url': f'/problems_Korean/{problem.id}/audio',
         'image_url': f'/problems_Korean/{problem.id}/image',
         'created_at': problem.created_at.isoformat() if problem.created_at else None
     })
+
+
+@app.route('/problems_Korean/<uuid>/audio', methods=['GET'])
+def get_problem_korean_audio(uuid):
+    """Get the audio file for a Korean problem."""
+    problem = KoreanProblem.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.audio_path or not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+    return send_file(problem.audio_path, as_attachment=False)
 
 
 @app.route('/problems_Korean/<uuid>/image', methods=['GET'])
@@ -1515,6 +1662,8 @@ def delete_problem_korean(uuid):
 
     if problem.image_path and os.path.exists(problem.image_path):
         os.remove(problem.image_path)
+    if problem.audio_path and os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
 
     db.session.delete(problem)
     db.session.commit()
@@ -1560,15 +1709,22 @@ def search_problem_english_summary():
 def create_problem_english_summary():
     """
     Create a new English problem summary.
-    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    Expects: multipart/form-data with 'image' file, 'audio' file, 'solution_latex', and optional 'answer', 'feature'
     """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
     image_file = request.files['image']
+    audio_file = request.files['audio']
     if image_file.filename == '':
         return jsonify({'error': 'No image file selected'}), 400
     if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
         return jsonify({'error': 'Invalid image file type'}), 400
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
     solution_latex = request.form.get('solution_latex')
     answer = request.form.get('answer')
     feature = request.form.get('feature')
@@ -1578,6 +1734,9 @@ def create_problem_english_summary():
     if len(image_data) > app.config['MAX_IMAGE_SIZE']:
         return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
     existing = EnglishProblemSummary.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
@@ -1590,7 +1749,9 @@ def create_problem_english_summary():
     image_path = os.path.join(app.config['IMAGE_FOLDER_ENGLISH_SUMMARY'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = EnglishProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_English_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_ENGLISH_SUMMARY'], problem_id)
+    problem = EnglishProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_English_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), audio_path=audio_path, answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'English problem summary created successfully'}), 201
@@ -1602,7 +1763,18 @@ def get_problem_english_summary(uuid):
     problem = EnglishProblemSummary.query.get(uuid)
     if not problem:
         return jsonify({'error': 'Problem not found'}), 404
-    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_English_summary/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'audio_url': f'/problems_English_summary/{problem.id}/audio', 'image_url': f'/problems_English_summary/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+
+
+@app.route('/problems_English_summary/<uuid>/audio', methods=['GET'])
+def get_problem_english_summary_audio(uuid):
+    """Get the audio file for an English problem summary."""
+    problem = EnglishProblemSummary.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.audio_path or not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+    return send_file(problem.audio_path, as_attachment=False)
 
 
 @app.route('/problems_English_summary/<uuid>/image', methods=['GET'])
@@ -1634,6 +1806,8 @@ def delete_problem_english_summary(uuid):
         return jsonify({'error': 'Problem not found'}), 404
     if problem.image_path and os.path.exists(problem.image_path):
         os.remove(problem.image_path)
+    if problem.audio_path and os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
     db.session.delete(problem)
     db.session.commit()
     return jsonify({'message': 'English problem summary deleted successfully'})
@@ -1677,15 +1851,22 @@ def search_problem_english_deep():
 def create_problem_english_deep():
     """
     Create a new English problem deep.
-    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    Expects: multipart/form-data with 'image' file, 'audio' file, 'solution_latex', and optional 'answer', 'feature'
     """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
     image_file = request.files['image']
+    audio_file = request.files['audio']
     if image_file.filename == '':
         return jsonify({'error': 'No image file selected'}), 400
     if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
         return jsonify({'error': 'Invalid image file type'}), 400
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
     solution_latex = request.form.get('solution_latex')
     answer = request.form.get('answer')
     feature = request.form.get('feature')
@@ -1695,6 +1876,9 @@ def create_problem_english_deep():
     if len(image_data) > app.config['MAX_IMAGE_SIZE']:
         return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
     existing = EnglishProblemDeep.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
@@ -1707,7 +1891,9 @@ def create_problem_english_deep():
     image_path = os.path.join(app.config['IMAGE_FOLDER_ENGLISH_DEEP'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = EnglishProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_English_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_ENGLISH_DEEP'], problem_id)
+    problem = EnglishProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_English_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), audio_path=audio_path, answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'English problem deep created successfully'}), 201
@@ -1719,7 +1905,18 @@ def get_problem_english_deep(uuid):
     problem = EnglishProblemDeep.query.get(uuid)
     if not problem:
         return jsonify({'error': 'Problem not found'}), 404
-    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_English_deep/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'audio_url': f'/problems_English_deep/{problem.id}/audio', 'image_url': f'/problems_English_deep/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+
+
+@app.route('/problems_English_deep/<uuid>/audio', methods=['GET'])
+def get_problem_english_deep_audio(uuid):
+    """Get the audio file for an English problem deep."""
+    problem = EnglishProblemDeep.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.audio_path or not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+    return send_file(problem.audio_path, as_attachment=False)
 
 
 @app.route('/problems_English_deep/<uuid>/image', methods=['GET'])
@@ -1751,6 +1948,8 @@ def delete_problem_english_deep(uuid):
         return jsonify({'error': 'Problem not found'}), 404
     if problem.image_path and os.path.exists(problem.image_path):
         os.remove(problem.image_path)
+    if problem.audio_path and os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
     db.session.delete(problem)
     db.session.commit()
     return jsonify({'message': 'English problem deep deleted successfully'})
@@ -1794,15 +1993,22 @@ def search_problem_science_summary():
 def create_problem_science_summary():
     """
     Create a new science problem summary.
-    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    Expects: multipart/form-data with 'image' file, 'audio' file, 'solution_latex', and optional 'answer', 'feature'
     """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
     image_file = request.files['image']
+    audio_file = request.files['audio']
     if image_file.filename == '':
         return jsonify({'error': 'No image file selected'}), 400
     if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
         return jsonify({'error': 'Invalid image file type'}), 400
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
     solution_latex = request.form.get('solution_latex')
     answer = request.form.get('answer')
     feature = request.form.get('feature')
@@ -1812,6 +2018,9 @@ def create_problem_science_summary():
     if len(image_data) > app.config['MAX_IMAGE_SIZE']:
         return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
     existing = ScienceProblemSummary.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
@@ -1824,7 +2033,9 @@ def create_problem_science_summary():
     image_path = os.path.join(app.config['IMAGE_FOLDER_SCIENCE_SUMMARY'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = ScienceProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_science_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_SCIENCE_SUMMARY'], problem_id)
+    problem = ScienceProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_science_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), audio_path=audio_path, answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Science problem summary created successfully'}), 201
@@ -1836,7 +2047,18 @@ def get_problem_science_summary(uuid):
     problem = ScienceProblemSummary.query.get(uuid)
     if not problem:
         return jsonify({'error': 'Problem not found'}), 404
-    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_science_summary/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'audio_url': f'/problems_science_summary/{problem.id}/audio', 'image_url': f'/problems_science_summary/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+
+
+@app.route('/problems_science_summary/<uuid>/audio', methods=['GET'])
+def get_problem_science_summary_audio(uuid):
+    """Get the audio file for a science problem summary."""
+    problem = ScienceProblemSummary.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.audio_path or not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+    return send_file(problem.audio_path, as_attachment=False)
 
 
 @app.route('/problems_science_summary/<uuid>/image', methods=['GET'])
@@ -1868,6 +2090,8 @@ def delete_problem_science_summary(uuid):
         return jsonify({'error': 'Problem not found'}), 404
     if problem.image_path and os.path.exists(problem.image_path):
         os.remove(problem.image_path)
+    if problem.audio_path and os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
     db.session.delete(problem)
     db.session.commit()
     return jsonify({'message': 'Science problem summary deleted successfully'})
@@ -1911,15 +2135,22 @@ def search_problem_science_deep():
 def create_problem_science_deep():
     """
     Create a new science problem deep.
-    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    Expects: multipart/form-data with 'image' file, 'audio' file, 'solution_latex', and optional 'answer', 'feature'
     """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
     image_file = request.files['image']
+    audio_file = request.files['audio']
     if image_file.filename == '':
         return jsonify({'error': 'No image file selected'}), 400
     if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
         return jsonify({'error': 'Invalid image file type'}), 400
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
     solution_latex = request.form.get('solution_latex')
     answer = request.form.get('answer')
     feature = request.form.get('feature')
@@ -1929,6 +2160,9 @@ def create_problem_science_deep():
     if len(image_data) > app.config['MAX_IMAGE_SIZE']:
         return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
     existing = ScienceProblemDeep.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
@@ -1941,7 +2175,9 @@ def create_problem_science_deep():
     image_path = os.path.join(app.config['IMAGE_FOLDER_SCIENCE_DEEP'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = ScienceProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_science_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_SCIENCE_DEEP'], problem_id)
+    problem = ScienceProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_science_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), audio_path=audio_path, answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Science problem deep created successfully'}), 201
@@ -1953,7 +2189,18 @@ def get_problem_science_deep(uuid):
     problem = ScienceProblemDeep.query.get(uuid)
     if not problem:
         return jsonify({'error': 'Problem not found'}), 404
-    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_science_deep/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'audio_url': f'/problems_science_deep/{problem.id}/audio', 'image_url': f'/problems_science_deep/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+
+
+@app.route('/problems_science_deep/<uuid>/audio', methods=['GET'])
+def get_problem_science_deep_audio(uuid):
+    """Get the audio file for a science problem deep."""
+    problem = ScienceProblemDeep.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.audio_path or not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+    return send_file(problem.audio_path, as_attachment=False)
 
 
 @app.route('/problems_science_deep/<uuid>/image', methods=['GET'])
@@ -1985,6 +2232,8 @@ def delete_problem_science_deep(uuid):
         return jsonify({'error': 'Problem not found'}), 404
     if problem.image_path and os.path.exists(problem.image_path):
         os.remove(problem.image_path)
+    if problem.audio_path and os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
     db.session.delete(problem)
     db.session.commit()
     return jsonify({'message': 'Science problem deep deleted successfully'})
@@ -2028,15 +2277,22 @@ def search_problem_social_science_summary():
 def create_problem_social_science_summary():
     """
     Create a new social science problem summary.
-    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    Expects: multipart/form-data with 'image' file, 'audio' file, 'solution_latex', and optional 'answer', 'feature'
     """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
     image_file = request.files['image']
+    audio_file = request.files['audio']
     if image_file.filename == '':
         return jsonify({'error': 'No image file selected'}), 400
     if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
         return jsonify({'error': 'Invalid image file type'}), 400
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
     solution_latex = request.form.get('solution_latex')
     answer = request.form.get('answer')
     feature = request.form.get('feature')
@@ -2046,6 +2302,9 @@ def create_problem_social_science_summary():
     if len(image_data) > app.config['MAX_IMAGE_SIZE']:
         return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
     existing = SocialScienceProblemSummary.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
@@ -2058,7 +2317,9 @@ def create_problem_social_science_summary():
     image_path = os.path.join(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE_SUMMARY'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = SocialScienceProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_social_science_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_SOCIAL_SCIENCE_SUMMARY'], problem_id)
+    problem = SocialScienceProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_social_science_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), audio_path=audio_path, answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Social science problem summary created successfully'}), 201
@@ -2070,7 +2331,18 @@ def get_problem_social_science_summary(uuid):
     problem = SocialScienceProblemSummary.query.get(uuid)
     if not problem:
         return jsonify({'error': 'Problem not found'}), 404
-    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_social_science_summary/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'audio_url': f'/problems_social_science_summary/{problem.id}/audio', 'image_url': f'/problems_social_science_summary/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+
+
+@app.route('/problems_social_science_summary/<uuid>/audio', methods=['GET'])
+def get_problem_social_science_summary_audio(uuid):
+    """Get the audio file for a social science problem summary."""
+    problem = SocialScienceProblemSummary.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.audio_path or not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+    return send_file(problem.audio_path, as_attachment=False)
 
 
 @app.route('/problems_social_science_summary/<uuid>/image', methods=['GET'])
@@ -2102,6 +2374,8 @@ def delete_problem_social_science_summary(uuid):
         return jsonify({'error': 'Problem not found'}), 404
     if problem.image_path and os.path.exists(problem.image_path):
         os.remove(problem.image_path)
+    if problem.audio_path and os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
     db.session.delete(problem)
     db.session.commit()
     return jsonify({'message': 'Social science problem summary deleted successfully'})
@@ -2145,15 +2419,22 @@ def search_problem_social_science_deep():
 def create_problem_social_science_deep():
     """
     Create a new social science problem deep.
-    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    Expects: multipart/form-data with 'image' file, 'audio' file, 'solution_latex', and optional 'answer', 'feature'
     """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
     image_file = request.files['image']
+    audio_file = request.files['audio']
     if image_file.filename == '':
         return jsonify({'error': 'No image file selected'}), 400
     if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
         return jsonify({'error': 'Invalid image file type'}), 400
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
     solution_latex = request.form.get('solution_latex')
     answer = request.form.get('answer')
     feature = request.form.get('feature')
@@ -2163,6 +2444,9 @@ def create_problem_social_science_deep():
     if len(image_data) > app.config['MAX_IMAGE_SIZE']:
         return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
     existing = SocialScienceProblemDeep.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
@@ -2175,7 +2459,9 @@ def create_problem_social_science_deep():
     image_path = os.path.join(app.config['IMAGE_FOLDER_SOCIAL_SCIENCE_DEEP'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = SocialScienceProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_social_science_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_SOCIAL_SCIENCE_DEEP'], problem_id)
+    problem = SocialScienceProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_social_science_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), audio_path=audio_path, answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Social science problem deep created successfully'}), 201
@@ -2187,7 +2473,18 @@ def get_problem_social_science_deep(uuid):
     problem = SocialScienceProblemDeep.query.get(uuid)
     if not problem:
         return jsonify({'error': 'Problem not found'}), 404
-    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_social_science_deep/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'audio_url': f'/problems_social_science_deep/{problem.id}/audio', 'image_url': f'/problems_social_science_deep/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+
+
+@app.route('/problems_social_science_deep/<uuid>/audio', methods=['GET'])
+def get_problem_social_science_deep_audio(uuid):
+    """Get the audio file for a social science problem deep."""
+    problem = SocialScienceProblemDeep.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.audio_path or not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+    return send_file(problem.audio_path, as_attachment=False)
 
 
 @app.route('/problems_social_science_deep/<uuid>/image', methods=['GET'])
@@ -2219,6 +2516,8 @@ def delete_problem_social_science_deep(uuid):
         return jsonify({'error': 'Problem not found'}), 404
     if problem.image_path and os.path.exists(problem.image_path):
         os.remove(problem.image_path)
+    if problem.audio_path and os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
     db.session.delete(problem)
     db.session.commit()
     return jsonify({'message': 'Social science problem deep deleted successfully'})
@@ -2262,15 +2561,22 @@ def search_problem_korean_summary():
 def create_problem_korean_summary():
     """
     Create a new Korean problem summary.
-    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    Expects: multipart/form-data with 'image' file, 'audio' file, 'solution_latex', and optional 'answer', 'feature'
     """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
     image_file = request.files['image']
+    audio_file = request.files['audio']
     if image_file.filename == '':
         return jsonify({'error': 'No image file selected'}), 400
     if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
         return jsonify({'error': 'Invalid image file type'}), 400
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
     solution_latex = request.form.get('solution_latex')
     answer = request.form.get('answer')
     feature = request.form.get('feature')
@@ -2280,6 +2586,9 @@ def create_problem_korean_summary():
     if len(image_data) > app.config['MAX_IMAGE_SIZE']:
         return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
     existing = KoreanProblemSummary.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
@@ -2292,7 +2601,9 @@ def create_problem_korean_summary():
     image_path = os.path.join(app.config['IMAGE_FOLDER_KOREAN_SUMMARY'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = KoreanProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_Korean_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_KOREAN_SUMMARY'], problem_id)
+    problem = KoreanProblemSummary(id=problem_id, image_hash=image_hash, image_url=f'/problems_Korean_summary/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), audio_path=audio_path, answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Korean problem summary created successfully'}), 201
@@ -2304,7 +2615,18 @@ def get_problem_korean_summary(uuid):
     problem = KoreanProblemSummary.query.get(uuid)
     if not problem:
         return jsonify({'error': 'Problem not found'}), 404
-    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_Korean_summary/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'audio_url': f'/problems_Korean_summary/{problem.id}/audio', 'image_url': f'/problems_Korean_summary/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+
+
+@app.route('/problems_Korean_summary/<uuid>/audio', methods=['GET'])
+def get_problem_korean_summary_audio(uuid):
+    """Get the audio file for a Korean problem summary."""
+    problem = KoreanProblemSummary.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.audio_path or not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+    return send_file(problem.audio_path, as_attachment=False)
 
 
 @app.route('/problems_Korean_summary/<uuid>/image', methods=['GET'])
@@ -2336,6 +2658,8 @@ def delete_problem_korean_summary(uuid):
         return jsonify({'error': 'Problem not found'}), 404
     if problem.image_path and os.path.exists(problem.image_path):
         os.remove(problem.image_path)
+    if problem.audio_path and os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
     db.session.delete(problem)
     db.session.commit()
     return jsonify({'message': 'Korean problem summary deleted successfully'})
@@ -2379,15 +2703,22 @@ def search_problem_korean_deep():
 def create_problem_korean_deep():
     """
     Create a new Korean problem deep.
-    Expects: multipart/form-data with 'image' file, 'solution_latex', and optional 'answer', 'feature'
+    Expects: multipart/form-data with 'image' file, 'audio' file, 'solution_latex', and optional 'answer', 'feature'
     """
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided'}), 400
+    if 'audio' not in request.files:
+        return jsonify({'error': 'No audio file provided'}), 400
     image_file = request.files['image']
+    audio_file = request.files['audio']
     if image_file.filename == '':
         return jsonify({'error': 'No image file selected'}), 400
     if not allowed_file(image_file.filename, app.config['ALLOWED_IMAGE_EXTENSIONS']):
         return jsonify({'error': 'Invalid image file type'}), 400
+    if audio_file.filename == '':
+        return jsonify({'error': 'No audio file selected'}), 400
+    if not allowed_file(audio_file.filename, app.config['ALLOWED_AUDIO_EXTENSIONS']):
+        return jsonify({'error': 'Invalid audio file type'}), 400
     solution_latex = request.form.get('solution_latex')
     answer = request.form.get('answer')
     feature = request.form.get('feature')
@@ -2397,6 +2728,9 @@ def create_problem_korean_deep():
     if len(image_data) > app.config['MAX_IMAGE_SIZE']:
         return jsonify({'error': 'Image file too large'}), 400
     image_hash = compute_image_hash(image_data)
+    audio_data = audio_file.read()
+    if len(audio_data) > app.config['MAX_AUDIO_SIZE']:
+        return jsonify({'error': 'Audio file too large'}), 400
     existing = KoreanProblemDeep.query.filter_by(image_hash=image_hash).first()
     if existing:
         return jsonify({'error': 'Problem with this image already exists', 'existing_uuid': existing.id}), 409
@@ -2409,7 +2743,9 @@ def create_problem_korean_deep():
     image_path = os.path.join(app.config['IMAGE_FOLDER_KOREAN_DEEP'], image_filename)
     with open(image_path, 'wb') as f:
         f.write(image_data)
-    problem = KoreanProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_Korean_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
+    audio_file.seek(0)
+    audio_path = save_file(audio_file, app.config['AUDIO_FOLDER_KOREAN_DEEP'], problem_id)
+    problem = KoreanProblemDeep(id=problem_id, image_hash=image_hash, image_url=f'/problems_Korean_deep/{problem_id}/image', image_path=image_path, solution_latex=str(solution_latex), audio_path=audio_path, answer=str(answer) if answer else None, feature=str(feature) if feature else None, latex_string=text_string)
     db.session.add(problem)
     db.session.commit()
     return jsonify({'uuid': problem.id, 'text_string': text_string, 'message': 'Korean problem deep created successfully'}), 201
@@ -2421,7 +2757,18 @@ def get_problem_korean_deep(uuid):
     problem = KoreanProblemDeep.query.get(uuid)
     if not problem:
         return jsonify({'error': 'Problem not found'}), 404
-    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_Korean_deep/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+    return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'audio_url': f'/problems_Korean_deep/{problem.id}/audio', 'image_url': f'/problems_Korean_deep/{problem.id}/image', 'created_at': problem.created_at.isoformat() if problem.created_at else None})
+
+
+@app.route('/problems_Korean_deep/<uuid>/audio', methods=['GET'])
+def get_problem_korean_deep_audio(uuid):
+    """Get the audio file for a Korean problem deep."""
+    problem = KoreanProblemDeep.query.get(uuid)
+    if not problem:
+        return jsonify({'error': 'Problem not found'}), 404
+    if not problem.audio_path or not os.path.exists(problem.audio_path):
+        return jsonify({'error': 'Audio file not found'}), 404
+    return send_file(problem.audio_path, as_attachment=False)
 
 
 @app.route('/problems_Korean_deep/<uuid>/image', methods=['GET'])
@@ -2453,6 +2800,8 @@ def delete_problem_korean_deep(uuid):
         return jsonify({'error': 'Problem not found'}), 404
     if problem.image_path and os.path.exists(problem.image_path):
         os.remove(problem.image_path)
+    if problem.audio_path and os.path.exists(problem.audio_path):
+        os.remove(problem.audio_path)
     db.session.delete(problem)
     db.session.commit()
     return jsonify({'message': 'Korean problem deep deleted successfully'})

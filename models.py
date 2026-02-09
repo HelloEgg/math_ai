@@ -139,7 +139,7 @@ class MathProblemOriginal(db.Model):
 
 
 class EnglishProblem(db.Model):
-    """Model for storing English problems (image URL + solution + answer, no audio)."""
+    """Model for storing English problems with solutions and audio."""
 
     __tablename__ = 'english_problems'
 
@@ -148,6 +148,7 @@ class EnglishProblem(db.Model):
     image_url = db.Column(db.String(2048), nullable=False)
     image_path = db.Column(db.String(512), nullable=True)
     solution_latex = db.Column(db.Text, nullable=False)
+    audio_path = db.Column(db.String(512), nullable=True)
     answer = db.Column(db.Text, nullable=True)
     feature = db.Column(db.Text, nullable=True)
     latex_string = db.Column(db.Text, nullable=True, index=True)
@@ -164,6 +165,7 @@ class EnglishProblem(db.Model):
             'image_url': self.image_url,
             'image_path': self.image_path,
             'solution_latex': self.solution_latex,
+            'audio_path': self.audio_path,
             'answer': self.answer,
             'feature': self.feature,
             'latex_string': self.latex_string,
@@ -173,7 +175,7 @@ class EnglishProblem(db.Model):
 
 
 class ScienceProblem(db.Model):
-    """Model for storing science problems (image URL + solution + answer, no audio)."""
+    """Model for storing science problems with solutions and audio."""
 
     __tablename__ = 'science_problems'
 
@@ -182,6 +184,7 @@ class ScienceProblem(db.Model):
     image_url = db.Column(db.String(2048), nullable=False)
     image_path = db.Column(db.String(512), nullable=True)
     solution_latex = db.Column(db.Text, nullable=False)
+    audio_path = db.Column(db.String(512), nullable=True)
     answer = db.Column(db.Text, nullable=True)
     feature = db.Column(db.Text, nullable=True)
     latex_string = db.Column(db.Text, nullable=True, index=True)
@@ -198,6 +201,7 @@ class ScienceProblem(db.Model):
             'image_url': self.image_url,
             'image_path': self.image_path,
             'solution_latex': self.solution_latex,
+            'audio_path': self.audio_path,
             'answer': self.answer,
             'feature': self.feature,
             'latex_string': self.latex_string,
@@ -207,7 +211,7 @@ class ScienceProblem(db.Model):
 
 
 class SocialScienceProblem(db.Model):
-    """Model for storing social science problems (image URL + solution + answer, no audio)."""
+    """Model for storing social science problems with solutions and audio."""
 
     __tablename__ = 'social_science_problems'
 
@@ -216,6 +220,7 @@ class SocialScienceProblem(db.Model):
     image_url = db.Column(db.String(2048), nullable=False)
     image_path = db.Column(db.String(512), nullable=True)
     solution_latex = db.Column(db.Text, nullable=False)
+    audio_path = db.Column(db.String(512), nullable=True)
     answer = db.Column(db.Text, nullable=True)
     feature = db.Column(db.Text, nullable=True)
     latex_string = db.Column(db.Text, nullable=True, index=True)
@@ -232,6 +237,7 @@ class SocialScienceProblem(db.Model):
             'image_url': self.image_url,
             'image_path': self.image_path,
             'solution_latex': self.solution_latex,
+            'audio_path': self.audio_path,
             'answer': self.answer,
             'feature': self.feature,
             'latex_string': self.latex_string,
@@ -241,7 +247,7 @@ class SocialScienceProblem(db.Model):
 
 
 class KoreanProblem(db.Model):
-    """Model for storing Korean problems (image URL + solution + answer, no audio)."""
+    """Model for storing Korean problems with solutions and audio."""
 
     __tablename__ = 'korean_problems'
 
@@ -250,6 +256,7 @@ class KoreanProblem(db.Model):
     image_url = db.Column(db.String(2048), nullable=False)
     image_path = db.Column(db.String(512), nullable=True)
     solution_latex = db.Column(db.Text, nullable=False)
+    audio_path = db.Column(db.String(512), nullable=True)
     answer = db.Column(db.Text, nullable=True)
     feature = db.Column(db.Text, nullable=True)
     latex_string = db.Column(db.Text, nullable=True, index=True)
@@ -266,6 +273,7 @@ class KoreanProblem(db.Model):
             'image_url': self.image_url,
             'image_path': self.image_path,
             'solution_latex': self.solution_latex,
+            'audio_path': self.audio_path,
             'answer': self.answer,
             'feature': self.feature,
             'latex_string': self.latex_string,
@@ -279,7 +287,7 @@ class KoreanProblem(db.Model):
 # =============================================================================
 
 class EnglishProblemSummary(db.Model):
-    """Model for storing English problem summaries."""
+    """Model for storing English problem summaries with audio."""
     __tablename__ = 'english_problems_summary'
 
     id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
@@ -287,6 +295,7 @@ class EnglishProblemSummary(db.Model):
     image_url = db.Column(db.String(2048), nullable=False)
     image_path = db.Column(db.String(512), nullable=True)
     solution_latex = db.Column(db.Text, nullable=False)
+    audio_path = db.Column(db.String(512), nullable=True)
     answer = db.Column(db.Text, nullable=True)
     feature = db.Column(db.Text, nullable=True)
     latex_string = db.Column(db.Text, nullable=True, index=True)
@@ -300,6 +309,7 @@ class EnglishProblemSummary(db.Model):
         return {
             'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
             'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'audio_path': self.audio_path,
             'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
@@ -307,7 +317,7 @@ class EnglishProblemSummary(db.Model):
 
 
 class ScienceProblemSummary(db.Model):
-    """Model for storing science problem summaries."""
+    """Model for storing science problem summaries with audio."""
     __tablename__ = 'science_problems_summary'
 
     id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
@@ -315,6 +325,7 @@ class ScienceProblemSummary(db.Model):
     image_url = db.Column(db.String(2048), nullable=False)
     image_path = db.Column(db.String(512), nullable=True)
     solution_latex = db.Column(db.Text, nullable=False)
+    audio_path = db.Column(db.String(512), nullable=True)
     answer = db.Column(db.Text, nullable=True)
     feature = db.Column(db.Text, nullable=True)
     latex_string = db.Column(db.Text, nullable=True, index=True)
@@ -328,6 +339,7 @@ class ScienceProblemSummary(db.Model):
         return {
             'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
             'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'audio_path': self.audio_path,
             'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
@@ -335,7 +347,7 @@ class ScienceProblemSummary(db.Model):
 
 
 class SocialScienceProblemSummary(db.Model):
-    """Model for storing social science problem summaries."""
+    """Model for storing social science problem summaries with audio."""
     __tablename__ = 'social_science_problems_summary'
 
     id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
@@ -343,6 +355,7 @@ class SocialScienceProblemSummary(db.Model):
     image_url = db.Column(db.String(2048), nullable=False)
     image_path = db.Column(db.String(512), nullable=True)
     solution_latex = db.Column(db.Text, nullable=False)
+    audio_path = db.Column(db.String(512), nullable=True)
     answer = db.Column(db.Text, nullable=True)
     feature = db.Column(db.Text, nullable=True)
     latex_string = db.Column(db.Text, nullable=True, index=True)
@@ -356,6 +369,7 @@ class SocialScienceProblemSummary(db.Model):
         return {
             'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
             'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'audio_path': self.audio_path,
             'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
@@ -363,7 +377,7 @@ class SocialScienceProblemSummary(db.Model):
 
 
 class KoreanProblemSummary(db.Model):
-    """Model for storing Korean problem summaries."""
+    """Model for storing Korean problem summaries with audio."""
     __tablename__ = 'korean_problems_summary'
 
     id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
@@ -371,6 +385,7 @@ class KoreanProblemSummary(db.Model):
     image_url = db.Column(db.String(2048), nullable=False)
     image_path = db.Column(db.String(512), nullable=True)
     solution_latex = db.Column(db.Text, nullable=False)
+    audio_path = db.Column(db.String(512), nullable=True)
     answer = db.Column(db.Text, nullable=True)
     feature = db.Column(db.Text, nullable=True)
     latex_string = db.Column(db.Text, nullable=True, index=True)
@@ -384,6 +399,7 @@ class KoreanProblemSummary(db.Model):
         return {
             'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
             'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'audio_path': self.audio_path,
             'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
@@ -395,7 +411,7 @@ class KoreanProblemSummary(db.Model):
 # =============================================================================
 
 class EnglishProblemDeep(db.Model):
-    """Model for storing English problem deep solutions."""
+    """Model for storing English problem deep solutions with audio."""
     __tablename__ = 'english_problems_deep'
 
     id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
@@ -403,6 +419,7 @@ class EnglishProblemDeep(db.Model):
     image_url = db.Column(db.String(2048), nullable=False)
     image_path = db.Column(db.String(512), nullable=True)
     solution_latex = db.Column(db.Text, nullable=False)
+    audio_path = db.Column(db.String(512), nullable=True)
     answer = db.Column(db.Text, nullable=True)
     feature = db.Column(db.Text, nullable=True)
     latex_string = db.Column(db.Text, nullable=True, index=True)
@@ -416,6 +433,7 @@ class EnglishProblemDeep(db.Model):
         return {
             'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
             'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'audio_path': self.audio_path,
             'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
@@ -423,7 +441,7 @@ class EnglishProblemDeep(db.Model):
 
 
 class ScienceProblemDeep(db.Model):
-    """Model for storing science problem deep solutions."""
+    """Model for storing science problem deep solutions with audio."""
     __tablename__ = 'science_problems_deep'
 
     id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
@@ -431,6 +449,7 @@ class ScienceProblemDeep(db.Model):
     image_url = db.Column(db.String(2048), nullable=False)
     image_path = db.Column(db.String(512), nullable=True)
     solution_latex = db.Column(db.Text, nullable=False)
+    audio_path = db.Column(db.String(512), nullable=True)
     answer = db.Column(db.Text, nullable=True)
     feature = db.Column(db.Text, nullable=True)
     latex_string = db.Column(db.Text, nullable=True, index=True)
@@ -444,6 +463,7 @@ class ScienceProblemDeep(db.Model):
         return {
             'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
             'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'audio_path': self.audio_path,
             'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
@@ -451,7 +471,7 @@ class ScienceProblemDeep(db.Model):
 
 
 class SocialScienceProblemDeep(db.Model):
-    """Model for storing social science problem deep solutions."""
+    """Model for storing social science problem deep solutions with audio."""
     __tablename__ = 'social_science_problems_deep'
 
     id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
@@ -459,6 +479,7 @@ class SocialScienceProblemDeep(db.Model):
     image_url = db.Column(db.String(2048), nullable=False)
     image_path = db.Column(db.String(512), nullable=True)
     solution_latex = db.Column(db.Text, nullable=False)
+    audio_path = db.Column(db.String(512), nullable=True)
     answer = db.Column(db.Text, nullable=True)
     feature = db.Column(db.Text, nullable=True)
     latex_string = db.Column(db.Text, nullable=True, index=True)
@@ -472,6 +493,7 @@ class SocialScienceProblemDeep(db.Model):
         return {
             'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
             'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'audio_path': self.audio_path,
             'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
@@ -479,7 +501,7 @@ class SocialScienceProblemDeep(db.Model):
 
 
 class KoreanProblemDeep(db.Model):
-    """Model for storing Korean problem deep solutions."""
+    """Model for storing Korean problem deep solutions with audio."""
     __tablename__ = 'korean_problems_deep'
 
     id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
@@ -487,6 +509,7 @@ class KoreanProblemDeep(db.Model):
     image_url = db.Column(db.String(2048), nullable=False)
     image_path = db.Column(db.String(512), nullable=True)
     solution_latex = db.Column(db.Text, nullable=False)
+    audio_path = db.Column(db.String(512), nullable=True)
     answer = db.Column(db.Text, nullable=True)
     feature = db.Column(db.Text, nullable=True)
     latex_string = db.Column(db.Text, nullable=True, index=True)
@@ -500,6 +523,7 @@ class KoreanProblemDeep(db.Model):
         return {
             'id': self.id, 'image_hash': self.image_hash, 'image_url': self.image_url,
             'image_path': self.image_path, 'solution_latex': self.solution_latex,
+            'audio_path': self.audio_path,
             'answer': self.answer, 'feature': self.feature, 'latex_string': self.latex_string,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
