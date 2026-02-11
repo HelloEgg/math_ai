@@ -3952,9 +3952,10 @@ def download_image_from_url(url):
         return None
 
 
-def generate_single_twin(api_key, image_data, original_url, base_url):
+def generate_single_twin(api_key, image_data, original_url, base_url, variation_index=0, num_total=1):
     """
     Generate a single twin question from image data.
+    variation_index and num_total are used to ensure each twin uses different numbers.
     Returns formatted response dict or None if failed.
     """
     try:
@@ -3967,7 +3968,22 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        prompt = """이 수학 문제 이미지를 분석하고 "쌍둥이" 문제를 생성하세요.
+        variation_hint = ""
+        if num_total > 1:
+            variation_hint = f"""
+
+★★★ 변형 번호: {variation_index + 1}/{num_total} ★★★
+이 문제는 같은 원본에서 총 {num_total}개의 서로 다른 쌍둥이를 만드는 중입니다.
+현재 {variation_index + 1}번째 변형입니다.
+반드시 다른 변형들과 겹치지 않는 숫자 조합을 사용하세요.
+- 변형 1: 숫자를 약간 줄이는 방향 (예: 40→35, 60→55)
+- 변형 2: 숫자를 약간 늘리는 방향 (예: 40→45, 60→65)
+- 변형 3: 숫자를 크게 줄이는 방향 (예: 40→25, 60→50)
+- 변형 4: 숫자를 크게 늘리는 방향 (예: 40→50, 60→75)
+- 변형 5 이상: 위 패턴을 참고하되 다양하게 변경
+현재 변형 {variation_index + 1}에 맞는 숫자 조합을 선택하세요."""
+
+        prompt = f"""이 수학 문제 이미지를 분석하고 "쌍둥이" 문제를 생성하세요.
 
 ★★★ 가장 중요한 규칙 ★★★
 쌍둥이 문제는 원본 문제에서 "숫자(상수)"만 바꾼 문제입니다.
@@ -3976,6 +3992,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
 - 함수의 종류(sin, cos, log 등)는 원본 그대로 유지하세요
 - 문장 구조와 질문 형태는 원본 그대로 유지하세요
 - 오직 숫자(계수, 상수, 좌표값, 각도 등)만 다른 값으로 바꾸세요
+{variation_hint}
 
 그래프/도형이 있는 경우:
 - 그래프/도형의 구조는 원본과 완전히 동일하게 유지
@@ -3988,7 +4005,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
 다음 JSON 형식으로만 응답하세요 (마크다운 없이, 코드 블록 없이, 순수 JSON만):
 
 그래프/도형이 있는 경우:
-{
+{{
     "question": "쌍둥이 수학 문제 (LaTeX 형식, 전체 문제 텍스트, 한국어로 작성)",
     "answer_number": 1,
     "solution": "단계별 풀이/설명 (LaTeX 형식, 한국어로 작성)",
@@ -3996,10 +4013,10 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
     "choices": ["① 선택지1", "② 선택지2", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"],
     "has_graph": true,
     "number_changes": ["40° → 30°", "60° → 70°"]
-}
+}}
 
 그래프가 없는 텍스트 전용 문제:
-{
+{{
     "question": "쌍둥이 수학 문제 (LaTeX 형식, 한국어로 작성)",
     "answer_number": 3,
     "solution": "단계별 풀이 (LaTeX 형식, 한국어로 작성)",
@@ -4007,10 +4024,10 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
     "choices": ["① 선택지1", "② 선택지2", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"],
     "has_graph": false,
     "number_changes": []
-}
+}}
 
 객관식이 아닌 경우:
-{
+{{
     "question": "쌍둥이 수학 문제 (LaTeX 형식, 한국어로 작성)",
     "answer_number": 0,
     "solution": "단계별 풀이 (LaTeX 형식, 한국어로 작성)",
@@ -4018,7 +4035,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
     "choices": [],
     "has_graph": false,
     "number_changes": []
-}
+}}
 
 중요 지침:
 - 모든 내용(문제, 풀이, 선택지)은 반드시 한국어로 작성하세요
@@ -4188,8 +4205,8 @@ def generate_math_twin_batch():
 
     def generate_task(task_info):
         image_url, image_data, task_index = task_info
-        print(f"  Generating twin {task_index+1} for {image_url}")
-        return generate_single_twin(api_key, image_data, image_url, base_url)
+        print(f"  Generating twin {task_index+1}/{num_questions} for {image_url}")
+        return generate_single_twin(api_key, image_data, image_url, base_url, variation_index=task_index, num_total=num_questions)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(generate_task, task): task for task in tasks}
