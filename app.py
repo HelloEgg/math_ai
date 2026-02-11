@@ -3540,6 +3540,121 @@ def generate_twin_image_from_original(api_key, original_image_data, number_chang
         return None
 
 
+def verify_image_text_consistency(api_key, image_data, question_text, choices=None, max_retries=2):
+    """
+    Verify that numbers/equations in the generated image exactly match the question text.
+    If mismatch found, regenerate the image with corrected instructions.
+
+    Args:
+        api_key: Gemini API key
+        image_data: Generated image data as bytes
+        question_text: The question text that the image should match
+        choices: List of choices that should appear in the image
+        max_retries: Max number of regeneration attempts
+
+    Returns:
+        Verified (or regenerated) image data as bytes
+    """
+    for attempt in range(max_retries):
+        try:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-2.0-flash')
+
+            choices_text = ""
+            if choices:
+                choices_text = f"\n\n선택지:\n{chr(10).join(choices)}"
+
+            verify_prompt = f"""이 수학 문제 이미지를 분석하고, 아래 문제 텍스트와 숫자가 정확히 일치하는지 확인하세요.
+
+문제 텍스트:
+{question_text}
+{choices_text}
+
+★★★ 확인사항 ★★★
+1. 이미지 안의 모든 수식, 숫자, 계수가 문제 텍스트와 정확히 같은지 확인
+2. 그래프에 표시된 방정식의 계수가 문제 텍스트의 계수와 같은지 확인
+3. 선택지가 문제 텍스트의 선택지와 같은지 확인
+
+JSON으로만 응답하세요:
+불일치가 없으면: {{"is_consistent": true}}
+불일치가 있으면: {{"is_consistent": false, "mismatches": ["문제: y=-1/5x²+3, 이미지: y=-1/6x²+3"]}}"""
+
+            image_part = {
+                "mime_type": "image/png",
+                "data": base64.b64encode(image_data).decode('utf-8')
+            }
+
+            response = model.generate_content([verify_prompt, image_part])
+            response_text = extract_json_from_response(response.text)
+            verify_result = json.loads(response_text)
+
+            if verify_result.get('is_consistent', False):
+                print(f"Image-text consistency PASSED (attempt {attempt + 1})")
+                return image_data
+            else:
+                mismatches = verify_result.get('mismatches', [])
+                print(f"Image-text consistency FAILED (attempt {attempt + 1}): {mismatches}")
+
+                # Regenerate the image with explicit correction instructions
+                try:
+                    from google import genai as genai_client
+                    from google.genai import types
+
+                    client = genai_client.Client(api_key=api_key)
+
+                    mismatch_text = "\n".join(f"- {m}" for m in mismatches)
+                    choices_instruction = ""
+                    if choices:
+                        choices_list = "\n".join(choices)
+                        choices_instruction = f"""
+
+선택지는 다음과 정확히 일치해야 합니다:
+{choices_list}"""
+
+                    fix_prompt = f"""이 수학 문제 이미지를 다시 그리세요. 다음 불일치를 수정해야 합니다:
+
+{mismatch_text}
+
+정확한 문제 텍스트:
+{question_text}
+{choices_instruction}
+
+★ 이미지의 모든 수식, 숫자, 계수가 위 문제 텍스트와 정확히 일치해야 합니다 ★
+★ 그래프에 표시되는 방정식도 문제 텍스트와 완전히 같아야 합니다 ★
+- 원본 이미지의 레이아웃과 스타일을 유지하세요
+- 흰색 배경
+- 검은색 텍스트와 선"""
+
+                    regen_response = client.models.generate_content(
+                        model="gemini-3-pro-image-preview",
+                        contents=[
+                            fix_prompt,
+                            types.Part.from_bytes(data=image_data, mime_type="image/png")
+                        ],
+                        config=types.GenerateContentConfig(
+                            response_modalities=['Image']
+                        )
+                    )
+
+                    for part in regen_response.candidates[0].content.parts:
+                        if part.inline_data is not None:
+                            new_image_data = ensure_white_background(part.inline_data.data)
+                            print(f"Regenerated image for consistency fix (attempt {attempt + 1})")
+                            image_data = new_image_data
+                            break
+                    else:
+                        print(f"No image in regeneration response (attempt {attempt + 1})")
+
+                except Exception as regen_e:
+                    print(f"Image regeneration failed (attempt {attempt + 1}): {regen_e}")
+
+        except Exception as e:
+            print(f"Image verification attempt {attempt + 1} error: {e}")
+            break
+
+    return image_data
+
+
 def verify_and_fix_twin(api_key, twin_result, max_retries=2):
     """
     Verify that a generated twin problem's answer exactly matches one of the choices.
@@ -3958,6 +4073,14 @@ def generate_math_twin():
                 )
 
             if generated_image_data:
+                # Verify image-text consistency before saving
+                print("Verifying image-text consistency...")
+                generated_image_data = verify_image_text_consistency(
+                    api_key=app.config['GEMINI_API_KEY'],
+                    image_data=generated_image_data,
+                    question_text=latex_string,
+                    choices=choices if is_mcq else None
+                )
                 # Save generated image to disk
                 generated_image_uuid = str(uuid.uuid4())
                 image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
@@ -4161,6 +4284,14 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                 )
 
             if generated_image_data:
+                # Verify image-text consistency before saving
+                print("Verifying image-text consistency...")
+                generated_image_data = verify_image_text_consistency(
+                    api_key=api_key,
+                    image_data=generated_image_data,
+                    question_text=latex_string,
+                    choices=choices if is_mcq else None
+                )
                 generated_image_uuid = str(uuid.uuid4())
                 image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
                 with open(image_path, 'wb') as f:
