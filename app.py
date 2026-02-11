@@ -3383,7 +3383,11 @@ def extract_json_from_response(response_text):
 def ensure_white_background(image_data):
     """
     Post-process generated image to ensure pure white background.
-    Converts any near-white or light gray pixels to pure white.
+    Handles both light gray backgrounds and dark/black backgrounds.
+
+    Strategy: Detect if background is dark (black) or light (gray/white).
+    - Dark background: invert the image (black→white, white→black stays as text)
+    - Light background: convert near-white pixels to pure white
 
     Args:
         image_data: Image data as bytes
@@ -3396,10 +3400,30 @@ def ensure_white_background(image_data):
         pixels = img.load()
         width, height = img.size
 
+        # Sample corner pixels to detect background color
+        corners = []
+        sample_size = min(20, width // 4, height // 4)
+        for y in range(sample_size):
+            for x in range(sample_size):
+                corners.append(pixels[x, y])
+                corners.append(pixels[width - 1 - x, y])
+                corners.append(pixels[x, height - 1 - y])
+                corners.append(pixels[width - 1 - x, height - 1 - y])
+
+        # Calculate average brightness of corners
+        avg_brightness = sum(r + g + b for r, g, b in corners) / (len(corners) * 3)
+
+        if avg_brightness < 80:
+            # Dark/black background detected - invert the entire image
+            from PIL import ImageOps
+            img = ImageOps.invert(img)
+            pixels = img.load()
+            print("Dark background detected - inverted image")
+
+        # Now handle light gray → pure white
         for y in range(height):
             for x in range(width):
                 r, g, b = pixels[x, y]
-                # If pixel is light gray or near-white (all channels > 200), make it pure white
                 if r > 200 and g > 200 and b > 200:
                     pixels[x, y] = (255, 255, 255)
 
@@ -3409,6 +3433,72 @@ def ensure_white_background(image_data):
     except Exception as e:
         print(f"White background conversion failed: {e}")
         return image_data
+
+
+def verify_solution(api_key, question_text, solution_text, answer, choices=None):
+    """
+    Verify that the solution is mathematically correct for the given question.
+    If incorrect, generate a corrected solution.
+
+    Returns:
+        Corrected solution text
+    """
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.0-flash')
+
+        choices_text = ""
+        if choices:
+            choices_text = f"\n\n선택지:\n{chr(10).join(choices)}"
+
+        prompt = f"""다음 수학 문제의 풀이가 정확한지 검증하세요.
+
+문제:
+{question_text}
+{choices_text}
+
+제시된 정답: {answer}
+
+제시된 풀이:
+{solution_text}
+
+★★★ 검증 작업 ★★★
+1. 문제를 처음부터 직접 풀어보세요
+2. 제시된 풀이의 각 단계가 수학적으로 정확한지 확인하세요
+3. 풀이에서 사용한 숫자가 문제의 숫자와 정확히 일치하는지 확인하세요
+4. 최종 정답이 올바른지 확인하세요
+
+JSON으로만 응답하세요:
+
+풀이가 정확하면:
+{{"is_correct": true}}
+
+풀이가 틀렸으면 (올바른 풀이를 제공):
+{{"is_correct": false, "errors": ["오류 설명"], "correct_solution": "올바른 단계별 풀이 (문제의 숫자와 정확히 일치, LaTeX 형식, 한국어)"}}
+
+중요:
+- correct_solution에서 사용하는 숫자는 문제의 숫자와 정확히 같아야 합니다
+- 풀이는 단계별로 깔끔하게 작성하세요"""
+
+        response = model.generate_content(prompt)
+        response_text = extract_json_from_response(response.text)
+        result = json.loads(response_text)
+
+        if result.get('is_correct', True):
+            print("Solution verification PASSED")
+            return solution_text
+        else:
+            errors = result.get('errors', [])
+            print(f"Solution verification FAILED: {errors}")
+            corrected = result.get('correct_solution', '')
+            if corrected:
+                print("Using corrected solution")
+                return corrected
+            return solution_text
+
+    except Exception as e:
+        print(f"Solution verification error: {e}")
+        return solution_text
 
 
 def generate_solution_image(api_key, solution_text):
@@ -4099,6 +4189,17 @@ def generate_math_twin():
         try:
             solution_text = result.get('solution', '')
             if solution_text:
+                # Verify solution correctness before generating image
+                print("Verifying solution correctness...")
+                solution_text = verify_solution(
+                    api_key=app.config['GEMINI_API_KEY'],
+                    question_text=latex_string,
+                    solution_text=solution_text,
+                    answer=result.get('answer', ''),
+                    choices=choices if is_mcq else None
+                )
+                result['solution'] = solution_text
+
                 print("Generating solution-only image...")
                 solution_image_data = generate_solution_image(
                     api_key=app.config['GEMINI_API_KEY'],
@@ -4308,6 +4409,17 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
         try:
             solution_text = result.get('solution', '')
             if solution_text:
+                # Verify solution correctness before generating image
+                print("Verifying solution correctness...")
+                solution_text = verify_solution(
+                    api_key=api_key,
+                    question_text=latex_string,
+                    solution_text=solution_text,
+                    answer=result.get('answer', result.get('answer_number', '')),
+                    choices=choices if is_mcq else None
+                )
+                result['solution'] = solution_text
+
                 print("Generating solution-only image...")
                 solution_image_data = generate_solution_image(
                     api_key=api_key,
