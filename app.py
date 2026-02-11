@@ -3530,6 +3530,107 @@ def generate_twin_image_from_original(api_key, original_image_data, number_chang
         return None
 
 
+def verify_and_fix_twin(api_key, twin_result, max_retries=2):
+    """
+    Verify that a generated twin problem is mathematically valid:
+    - For MCQ: the correct answer must exactly match one of the choices
+    - The solution must be solvable and correct
+
+    If invalid, asks Gemini to fix the problem by adjusting numbers or choices.
+    Returns the fixed result dict, or the original if verification passes or fix fails.
+    """
+    is_mcq = twin_result.get('is_mcq', False)
+    if not is_mcq:
+        # Non-MCQ problems don't need choice verification
+        return twin_result
+
+    choices = twin_result.get('choices', [])
+    if not choices:
+        return twin_result
+
+    question = twin_result.get('question', '')
+    solution = twin_result.get('solution', '')
+    answer = twin_result.get('answer', twin_result.get('answer_number', ''))
+
+    for attempt in range(max_retries):
+        try:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-2.0-flash')
+
+            verify_prompt = f"""다음 수학 문제를 검증하세요.
+
+문제:
+{question}
+
+선택지:
+{chr(10).join(choices)}
+
+제시된 풀이:
+{solution}
+
+제시된 정답: {answer}
+
+★★★ 검증 작업 ★★★
+1. 문제를 처음부터 직접 풀어보세요
+2. 직접 푼 정답이 선택지 중 하나와 정확히 일치하는지 확인하세요
+3. 근사값이 아닌 정확한 값이 선택지에 있어야 합니다
+
+결과를 다음 JSON 형식으로만 응답하세요 (마크다운 없이, 순수 JSON만):
+
+정답이 선택지에 있는 경우:
+{{"is_valid": true, "correct_answer": "정확한 정답 값", "matching_choice_number": 1}}
+
+정답이 선택지에 없는 경우 (숫자를 조정하여 수정):
+{{"is_valid": false, "correct_answer": "현재 정답 값", "reason": "왜 선택지에 없는지 설명", "fixed_question": "수정된 문제 (LaTeX)", "fixed_solution": "수정된 풀이 (LaTeX)", "fixed_answer": "수정된 정답", "fixed_choices": ["① 선택지1", "② 선택지2", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"], "fixed_answer_number": 1, "fixed_number_changes": ["원본숫자 → 수정숫자"]}}
+
+중요:
+- 수정할 때 문제의 구조는 절대 바꾸지 마세요
+- 숫자만 조정하여 정답이 깔끔한 값이 되도록 하세요
+- 정답이 반드시 선택지 중 하나와 정확히 일치해야 합니다
+- 유효한 JSON만 응답하세요"""
+
+            response = model.generate_content(verify_prompt)
+            response_text = extract_json_from_response(response.text)
+            verify_result = json.loads(response_text)
+
+            if verify_result.get('is_valid', False):
+                print(f"Twin verification passed (attempt {attempt + 1}): answer matches choices")
+                # Update answer_number if provided
+                matching = verify_result.get('matching_choice_number')
+                if matching and 'answer_number' in twin_result:
+                    twin_result['answer_number'] = matching
+                elif matching and 'answer' in twin_result:
+                    twin_result['answer'] = verify_result.get('correct_answer', answer)
+                return twin_result
+            else:
+                reason = verify_result.get('reason', 'unknown')
+                print(f"Twin verification failed (attempt {attempt + 1}): {reason}")
+
+                # Apply fixes
+                if verify_result.get('fixed_question'):
+                    twin_result['question'] = verify_result['fixed_question']
+                if verify_result.get('fixed_solution'):
+                    twin_result['solution'] = verify_result['fixed_solution']
+                if verify_result.get('fixed_choices'):
+                    twin_result['choices'] = verify_result['fixed_choices']
+                if verify_result.get('fixed_number_changes'):
+                    twin_result['number_changes'] = verify_result['fixed_number_changes']
+
+                if 'answer_number' in twin_result and verify_result.get('fixed_answer_number'):
+                    twin_result['answer_number'] = verify_result['fixed_answer_number']
+                elif 'answer' in twin_result and verify_result.get('fixed_answer'):
+                    twin_result['answer'] = verify_result['fixed_answer']
+
+                print(f"Applied fix from verification (attempt {attempt + 1})")
+                # Continue loop to re-verify the fix
+
+        except Exception as e:
+            print(f"Verification attempt {attempt + 1} failed: {e}")
+            break
+
+    return twin_result
+
+
 def generate_question_image(api_key, latex_string, choices=None, graph_description=None, has_graph=False):
     """
     Generate a complete question image using Gemini's image generation model.
@@ -3846,6 +3947,9 @@ def generate_math_twin():
                 'raw_response': response.text
             }), 500
 
+        # Verify and fix: ensure answer matches a choice (for MCQ)
+        result = verify_and_fix_twin(app.config['GEMINI_API_KEY'], result)
+
         # Extract question data
         latex_string = result.get('question', '')
         choices = result.get('choices', [])
@@ -4055,6 +4159,9 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
         response = model.generate_content([prompt, image_part])
         response_text = extract_json_from_response(response.text)
         result = json.loads(response_text)
+
+        # Verify and fix: ensure answer matches a choice (for MCQ)
+        result = verify_and_fix_twin(api_key, result)
 
         # Extract question data
         latex_string = result.get('question', '')
