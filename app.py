@@ -3479,48 +3479,131 @@ JSON으로만 응답하세요:
     return json.loads(response_text)
 
 
-def twin_step1_change_diagram(api_key, original_image_data, variation_index=0, num_total=1):
+def twin_step1_change_diagram(api_key, original_image_data, mime_type="image/png", variation_index=0, num_total=1):
     """
-    Step 1 (diagram exists): Change only the number variables in the diagram image.
-    Uses gemini-3-pro-image-preview to edit the original diagram.
-    Returns: new image data as bytes, or None
+    Step 1 (diagram path): Decide number changes, then generate new diagram with those exact numbers.
+
+    Pipeline:
+      1a. OCR the original image → extract question text + all numbers in the diagram
+      1b. AI decides new numbers → returns structured mapping (e.g. {"18": "20", "14": "12"})
+      1c. Generate new diagram image with those exact numbers using gemini-3-pro-image-preview
+
+    Returns:
+        dict with:
+          - 'image_data': new diagram image bytes (or None if failed)
+          - 'number_changes': dict mapping old→new (e.g. {"18": "20", "14": "12"})
+          - 'original_question': original question text from OCR
+          - 'original_numbers': list of original numbers found
     """
+    import google.generativeai as genai_lib
+    genai_lib.configure(api_key=api_key)
+    model = genai_lib.GenerativeModel('gemini-3-pro-preview')
+
+    # === 1a. OCR the original image: extract question text + all numbers ===
+    ocr_prompt = """이 수학 문제 이미지를 완전히 분석하세요.
+
+1. 문제 텍스트를 정확히 읽으세요 (선택지 ①②③④⑤ 제외)
+2. 도형/그래프/그림 안에 표시된 숫자를 모두 추출하세요 (길이, 각도, 좌표, 넓이 등)
+3. 문제 텍스트에 있는 숫자도 모두 추출하세요
+
+★ 숫자 옆 단위(m, cm, °, m² 등)는 제외하고 순수 숫자만 ★
+★ 문제 번호는 제외 ★
+
+JSON으로만 응답하세요:
+{
+    "question_text": "문제 전체 텍스트 (선택지 제외, LaTeX/한국어)",
+    "diagram_numbers": ["18", "14"],
+    "text_numbers": ["208"]
+}
+
+diagram_numbers: 도형/그래프/그림 안에 적힌 숫자들 (순수 숫자)
+text_numbers: 문제 텍스트에만 있는 숫자들 (순수 숫자)"""
+
+    image_part = {"mime_type": mime_type, "data": base64.b64encode(original_image_data).decode('utf-8')}
+    response = model.generate_content([ocr_prompt, image_part])
+    ocr_result = json.loads(extract_json_from_response(response.text))
+
+    original_question = ocr_result.get('question_text', '')
+    diagram_numbers = ocr_result.get('diagram_numbers', [])
+    text_numbers = ocr_result.get('text_numbers', [])
+    all_numbers = diagram_numbers + text_numbers
+    print(f"  Step 1a OCR: question={original_question[:80]}...")
+    print(f"  Step 1a OCR: diagram_numbers={diagram_numbers}, text_numbers={text_numbers}")
+
+    # === 1b. AI decides new numbers: structured mapping ===
+    variation_hint = ""
+    if num_total > 1:
+        hints = {
+            0: "숫자를 약간 줄이세요 (예: 18→15, 14→11)",
+            1: "숫자를 약간 늘리세요 (예: 18→21, 14→17)",
+            2: "숫자를 크게 줄이세요 (예: 18→10, 14→8)",
+            3: "숫자를 크게 늘리세요 (예: 18→25, 14→20)",
+        }
+        hint = hints.get(variation_index, f"변형 {variation_index+1}에 맞는 고유한 숫자를 사용하세요")
+        variation_hint = f"\n★ 변형 {variation_index+1}/{num_total}: {hint}"
+
+    change_prompt = f"""다음은 수학 문제에서 추출한 숫자들입니다.
+이 숫자들을 변경하여 새로운 문제를 만들려고 합니다.
+
+도형/그래프 안 숫자: {diagram_numbers}
+문제 텍스트 숫자: {text_numbers}
+{variation_hint}
+
+★★★ 규칙 ★★★
+1. 각 숫자에 대해 새로운 숫자를 정하세요
+2. 변경된 숫자가 수학적으로 유효해야 합니다 (예: 길이는 양수, 각도는 0~360)
+3. 원본과 너무 비슷하지 않게 변경하세요 (최소 2 이상 차이)
+4. 원본 숫자 구조 유지 (정수→정수, 소수→소수)
+
+JSON으로만 응답하세요:
+{{"number_changes": {{"18": "20", "14": "12", "208": "192"}}}}
+
+number_changes: 원본숫자(key) → 새숫자(value) 매핑"""
+
+    change_response = model.generate_content(change_prompt)
+    change_result = json.loads(extract_json_from_response(change_response.text))
+    number_changes = change_result.get('number_changes', {})
+    print(f"  Step 1b: Decided number changes: {number_changes}")
+
+    if not number_changes:
+        print("  Step 1b: No number changes decided, aborting")
+        return {
+            'image_data': None,
+            'number_changes': {},
+            'original_question': original_question,
+            'original_numbers': all_numbers
+        }
+
+    # === 1c. Generate new diagram image with those exact numbers ===
     try:
         from google import genai
         from google.genai import types
 
         client = genai.Client(api_key=api_key)
 
-        variation_hint = ""
-        if num_total > 1:
-            hints = {
-                0: "숫자를 약간 줄이는 방향으로 변경하세요 (예: 40→35, 60→55)",
-                1: "숫자를 약간 늘리는 방향으로 변경하세요 (예: 40→45, 60→65)",
-                2: "숫자를 크게 줄이는 방향으로 변경하세요 (예: 40→25, 60→45)",
-                3: "숫자를 크게 늘리는 방향으로 변경하세요 (예: 40→55, 60→80)",
-            }
-            hint = hints.get(variation_index, f"변형 {variation_index+1}에 맞는 고유한 숫자를 사용하세요")
-            variation_hint = f"\n★ 변형 {variation_index+1}/{num_total}: {hint}"
+        changes_text = "\n".join(f"  - {old} → {new}" for old, new in number_changes.items())
 
-        prompt = f"""이 수학 문제 이미지에서 숫자만 변경하여 새 이미지를 생성하세요.
+        gen_prompt = f"""이 수학 문제 이미지에서 아래 숫자들만 정확히 변경하여 새 이미지를 생성하세요.
 
-★★★ 규칙 ★★★
-1. 그래프, 도형, 그림의 형태와 구조는 원본과 완전히 동일하게 유지
-2. 점의 위치, 선의 연결, 도형의 모양은 절대 바꾸지 않음
-3. 변수명, 점 이름(A, B, C, D, O 등)은 원본 그대로
-4. 수식의 구조와 형태는 그대로 유지하고 숫자(계수, 상수, 좌표값, 각도, 길이 등)만 변경
-5. 문제 텍스트의 구조도 원본과 동일하게 유지하고 숫자만 변경
+★★★ 변경할 숫자 (반드시 이 숫자만 사용하세요) ★★★
+{changes_text}
+
+★★★ 절대 규칙 ★★★
+1. 위에 명시된 숫자 변경만 적용하세요 - 다른 숫자로 바꾸지 마세요
+2. 그래프, 도형, 그림의 형태와 구조는 원본과 완전히 동일하게 유지
+3. 점의 위치, 선의 연결, 도형의 모양은 절대 바꾸지 않음
+4. 변수명, 점 이름(A, B, C, D, O 등)은 원본 그대로
+5. 문제 텍스트의 구조도 원본과 동일하게 유지하고 위 숫자만 변경
 6. 선택지(①②③④⑤)가 있다면 선택지는 제거하세요 (나중에 새로 만듭니다)
 7. 흰색 배경 (#FFFFFF), 검은색 텍스트와 선
 8. 원본과 동일한 레이아웃과 스타일
-{variation_hint}
 
-변경된 숫자가 수학적으로 유효해야 합니다."""
+★ 반드시 위 변경 목록의 새 숫자를 정확히 사용하세요 ★"""
 
-        response = client.models.generate_content(
+        gen_response = client.models.generate_content(
             model="gemini-3-pro-image-preview",
             contents=[
-                prompt,
+                gen_prompt,
                 types.Part.from_bytes(data=original_image_data, mime_type="image/png")
             ],
             config=types.GenerateContentConfig(
@@ -3528,366 +3611,69 @@ def twin_step1_change_diagram(api_key, original_image_data, variation_index=0, n
             )
         )
 
-        for part in response.candidates[0].content.parts:
+        new_image_data = None
+        for part in gen_response.candidates[0].content.parts:
             if part.inline_data is not None:
-                image_data = part.inline_data.data
-                print(f"Step 1: Generated new diagram: {len(image_data)} bytes")
-                return ensure_white_background(image_data)
+                new_image_data = ensure_white_background(part.inline_data.data)
+                print(f"  Step 1c: Generated new diagram: {len(new_image_data)} bytes")
+                break
 
-        print("Step 1: No image in Gemini response")
-        return None
+        if not new_image_data:
+            print("  Step 1c: No image in Gemini response")
+
+        return {
+            'image_data': new_image_data,
+            'number_changes': number_changes,
+            'original_question': original_question,
+            'original_numbers': all_numbers
+        }
 
     except Exception as e:
-        print(f"Step 1: Diagram editing failed: {e}")
-        return None
+        print(f"  Step 1c: Diagram generation failed: {e}")
+        return {
+            'image_data': None,
+            'number_changes': number_changes,
+            'original_question': original_question,
+            'original_numbers': all_numbers
+        }
 
 
-def twin_step2_question_from_diagram(api_key, new_diagram_data, original_image_data, mime_type):
+def twin_step2_question_from_diagram(api_key, step1_result):
     """
-    Step 2 (diagram exists):
-    1. OCR the original image → get original question text + numbers
-    2. OCR the new diagram → get new numbers
-    3. Substitute numbers in original text → new question text
-    Returns: dict with new_question
-    """
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-3-pro-preview')
+    Step 2 (diagram path): Replace numbers in question text using the known number_changes from step 1.
 
-    # Step 2a: OCR original image - get full text and all numbers
-    ocr_prompt = """이 수학 문제 이미지를 완전히 읽어주세요.
+    This is a deterministic substitution - we know exactly which numbers changed
+    because step 1 decided them. No OCR needed.
 
-1. 문제 텍스트를 정확히 읽으세요 (선택지 제외)
-2. 이미지 안(도형/그래프 포함)에 보이는 모든 숫자를 빠짐없이 추출하세요
-
-JSON으로만 응답하세요:
-{"question_text": "문제 전체 텍스트 (LaTeX, 한국어, 선택지 제외)", "numbers_in_image": ["18m", "14m", "216m²"]}
-
-numbers_in_image: 이미지에 보이는 모든 숫자 (단위 포함)"""
-
-    original_part = {"mime_type": mime_type, "data": base64.b64encode(original_image_data).decode('utf-8')}
-    response1 = model.generate_content([ocr_prompt, original_part])
-    original_ocr = json.loads(extract_json_from_response(response1.text))
-    original_text = original_ocr.get('question_text', '')
-    original_numbers = original_ocr.get('numbers_in_image', [])
-    print(f"  Original OCR: text={original_text[:80]}..., numbers={original_numbers}")
-
-    # Step 2b: OCR new diagram - get all numbers
-    new_ocr_prompt = """이 수학 문제 이미지에서 보이는 모든 숫자를 읽어주세요.
-도형/그래프 안의 숫자, 문제 텍스트의 숫자 모두 포함합니다.
-
-JSON으로만 응답하세요:
-{"numbers_in_image": ["20m", "16m", "252m²"]}"""
-
-    new_part = {"mime_type": "image/png", "data": base64.b64encode(new_diagram_data).decode('utf-8')}
-    response2 = model.generate_content([new_ocr_prompt, new_part])
-    new_ocr = json.loads(extract_json_from_response(response2.text))
-    new_numbers = new_ocr.get('numbers_in_image', [])
-    print(f"  New diagram numbers: {new_numbers}")
-
-    # Build number_changes from original → new mapping
-    number_changes = []
-    for i in range(min(len(original_numbers), len(new_numbers))):
-        if original_numbers[i] != new_numbers[i]:
-            number_changes.append(f"{original_numbers[i]} → {new_numbers[i]}")
-    print(f"  Number changes: {number_changes}")
-
-    # Step 2c: Ask Gemini to substitute numbers in original text
-    substitute_prompt = f"""원본 문제 텍스트에서 숫자만 교체하세요.
-
-원본 문제 텍스트:
-{original_text}
-
-원본 이미지의 숫자들: {original_numbers}
-새 이미지의 숫자들: {new_numbers}
-
-★★★ 규칙 ★★★
-- 원본 텍스트의 문장 구조, 수식 구조, 변수명은 절대 변경하지 마세요
-- 원본 숫자를 새 숫자로 1:1 대응하여 교체만 하세요
-- 새 이미지의 숫자를 정확히 사용하세요
-- 선택지는 포함하지 마세요
-
-JSON으로만 응답하세요:
-{{"new_question": "숫자만 교체된 새 문제 텍스트 (LaTeX, 한국어)"}}"""
-
-    response3 = model.generate_content(substitute_prompt)
-    result = json.loads(extract_json_from_response(response3.text))
-    result['number_changes'] = number_changes
-    return result
-
-
-def _extract_numbers_from_text(text):
-    """
-    Extract all numerical values (with optional units) from a text string using regex.
-    Returns a sorted list of unique number strings found.
-
-    Handles: integers, decimals, fractions, negative numbers, and numbers with units.
-    Examples: "20", "3.14", "20m", "45°", "1/2", "-3", "252m²"
-    """
-    if not text:
-        return []
-
-    # Pattern matches numbers with optional units
-    # Handles: -3, 20, 3.14, 20m, 45°, 252m², 1/2, √2, 2π
-    # Order matters: fractions first to avoid partial matches
-    fraction_pattern = r'-?\d+/\d+'
-    number_with_unit_pattern = r'-?\d+\.?\d*\s*(?:m²|cm²|km²|m³|cm³|°|m|cm|mm|km|kg|g|L|mL|%)?'
-
-    numbers = []
-    # First pass: find and record all fractions, mark their positions
-    fraction_spans = set()
-    for match in re.finditer(fraction_pattern, text):
-        cleaned = match.group().strip()
-        if cleaned and any(c.isdigit() for c in cleaned):
-            numbers.append(cleaned)
-            for i in range(match.start(), match.end()):
-                fraction_spans.add(i)
-
-    # Second pass: find numbers, skip those overlapping with fractions
-    for match in re.finditer(number_with_unit_pattern, text):
-        if any(i in fraction_spans for i in range(match.start(), match.end())):
-            continue
-        cleaned = match.group().strip()
-        if cleaned and any(c.isdigit() for c in cleaned):
-            numbers.append(cleaned)
-
-    # Deduplicate while preserving order
-    seen = set()
-    unique_numbers = []
-    for n in numbers:
-        if n not in seen:
-            seen.add(n)
-            unique_numbers.append(n)
-
-    return unique_numbers
-
-
-def _extract_pure_number(value_str):
-    """
-    Extract the pure numeric value from a string like '20m', '45°', '252m²'.
-    Returns the numeric part as a string, and the unit part.
-    """
-    if not value_str:
-        return '', ''
-    value_str = value_str.strip()
-
-    # Try fraction first
-    frac_match = re.match(r'^(-?\d+/\d+)\s*(.*)', value_str)
-    if frac_match:
-        return frac_match.group(1), frac_match.group(2).strip()
-
-    # Standard number with optional unit
-    match = re.match(r'^(-?\d+\.?\d*)\s*(.*)', value_str)
-    if match:
-        return match.group(1), match.group(2).strip()
-
-    return value_str, ''
-
-
-def twin_validate_question_vs_image(api_key, image_data, question_text, max_retries=3):
-    """
-    Robust validation: ensure ALL numbers in the generated diagram image match the question text exactly.
-
-    5-phase approach:
-      Phase 1: Structured OCR - extract every number with meaning from the image (via AI)
-      Phase 2: Local regex extraction - extract all numbers from question text (deterministic)
-      Phase 3: Cross-validation - compare both sets, find mismatches
-      Phase 4: If mismatch found, correct question text to match diagram (diagram is source of truth)
-      Phase 5: Re-validate corrected text against image numbers
-
-    The diagram image is treated as the SOURCE OF TRUTH.
-    The question text is adjusted to match the diagram, never vice versa.
+    Args:
+        api_key: Gemini API key
+        step1_result: dict from twin_step1_change_diagram containing:
+            - original_question: original question text
+            - number_changes: dict mapping old→new numbers
 
     Returns:
-        Corrected question text (matching the image exactly)
+        dict with 'new_question' and 'number_changes'
     """
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-3-pro-preview')
+    original_question = step1_result.get('original_question', '')
+    number_changes = step1_result.get('number_changes', {})
 
-    image_part = {
-        "mime_type": "image/png",
-        "data": base64.b64encode(image_data).decode('utf-8')
+    if not number_changes or not original_question:
+        return {'new_question': original_question, 'number_changes': number_changes}
+
+    # Deterministic replacement: replace old numbers with new numbers in question text
+    # Sort by length descending to avoid partial replacements (e.g. "18" before "1")
+    new_question = original_question
+    for old_num, new_num in sorted(number_changes.items(), key=lambda x: len(x[0]), reverse=True):
+        new_question = new_question.replace(old_num, new_num)
+
+    print(f"  Step 2: Original question: {original_question[:100]}...")
+    print(f"  Step 2: New question:      {new_question[:100]}...")
+    print(f"  Step 2: Changes applied:   {number_changes}")
+
+    return {
+        'new_question': new_question,
+        'number_changes': number_changes
     }
-
-    # === Phase 1: Structured OCR - extract every number with meaning from the image ===
-    ocr_prompt = """이 수학 문제 이미지에서 보이는 모든 숫자를 의미와 함께 추출하세요.
-
-★★★ 반드시 모든 숫자를 빠짐없이 추출하세요 ★★★
-- 도형/그래프 안에 표시된 숫자 (길이, 각도, 좌표, 넓이 등)
-- 문제 텍스트에 있는 숫자
-- 수식의 계수, 상수
-- 숫자 옆에 적힌 단위(m, cm, °, m² 등)도 반드시 포함
-
-★ 선택지(①②③④⑤) 안의 숫자는 제외 ★
-★ 문제 번호는 제외 ★
-
-JSON으로만 응답하세요:
-{"numbers": [
-    {"value": "20m", "meaning": "직사각형 가로 길이", "location": "diagram"},
-    {"value": "16m", "meaning": "직사각형 세로 길이", "location": "diagram"},
-    {"value": "252m²", "meaning": "화단의 넓이", "location": "text"}
-]}
-
-location은 "diagram" (도형/그래프 안) 또는 "text" (문제 텍스트) 중 하나"""
-
-    try:
-        ocr_response = model.generate_content([ocr_prompt, image_part])
-        ocr_result = json.loads(extract_json_from_response(ocr_response.text))
-        image_numbers = ocr_result.get('numbers', [])
-        print(f"  [Validation Phase 1] Image OCR extracted {len(image_numbers)} numbers: {image_numbers}")
-    except Exception as e:
-        print(f"  [Validation Phase 1] OCR failed: {e}, skipping validation")
-        return question_text
-
-    if not image_numbers:
-        print("  [Validation Phase 1] No numbers found in image, skipping validation")
-        return question_text
-
-    # === Phase 2: Local regex extraction - extract all numbers from question text ===
-    question_numbers = _extract_numbers_from_text(question_text)
-    print(f"  [Validation Phase 2] Question text numbers (regex): {question_numbers}")
-
-    # Extract image number values for comparison
-    image_values = []
-    for n in image_numbers:
-        val = n.get('value', '').strip()
-        if val:
-            image_values.append(val)
-    print(f"  [Validation Phase 2] Image number values: {image_values}")
-
-    # === Phase 3: Cross-validation - compare numbers ===
-    # Check each diagram number exists in the question text
-    # Use pure numeric comparison (strip units for flexible matching)
-    image_pure_numbers = set()
-    for val in image_values:
-        pure_num, _ = _extract_pure_number(val)
-        if pure_num:
-            image_pure_numbers.add(pure_num)
-
-    question_pure_numbers = set()
-    for val in question_numbers:
-        pure_num, _ = _extract_pure_number(val)
-        if pure_num:
-            question_pure_numbers.add(pure_num)
-
-    # Numbers in diagram but NOT in question text
-    missing_in_question = image_pure_numbers - question_pure_numbers
-    # Numbers in question text but NOT in diagram
-    extra_in_question = question_pure_numbers - image_pure_numbers
-
-    print(f"  [Validation Phase 3] Diagram-only numbers: {missing_in_question}")
-    print(f"  [Validation Phase 3] Question-only numbers: {extra_in_question}")
-
-    if not missing_in_question and not extra_in_question:
-        print(f"  [Validation Phase 3] All numbers match perfectly (local check)")
-        # Still do AI verification as a final check since regex can miss context
-    elif not missing_in_question:
-        print(f"  [Validation Phase 3] All diagram numbers found in question (extra question numbers may be derived values)")
-
-    # === Phase 4 & 5: AI-powered deep comparison and correction ===
-    current_question = question_text
-
-    for attempt in range(max_retries):
-        try:
-            numbers_list = "\n".join(
-                f"  - {n.get('meaning', '?')}: \"{n.get('value', '?')}\" (위치: {n.get('location', '?')})"
-                for n in image_numbers
-            )
-
-            # Also extract current question's numbers for side-by-side display
-            current_q_numbers = _extract_numbers_from_text(current_question)
-
-            compare_prompt = f"""당신은 수학 문제의 품질 검증 전문가입니다.
-아래 다이어그램/도형 이미지의 숫자와 문제 텍스트의 숫자가 정확히 일치하는지 엄격하게 검증하세요.
-
-★★★ 이미지(다이어그램/도형)에서 추출한 숫자 목록 ★★★
-{numbers_list}
-
-★★★ 현재 문제 텍스트 ★★★
-{current_question}
-
-★★★ 문제 텍스트에서 추출한 숫자들 ★★★
-{current_q_numbers}
-
-★★★ 검증 규칙 ★★★
-1. 이미지의 각 숫자가 문제 텍스트에 정확히 존재하는지 확인하세요
-2. 숫자의 값이 정확히 같아야 합니다 (20 vs 20 ✓, 20 vs 14 ✗)
-3. 단위가 같아야 합니다 (m vs m ✓, m vs cm ✗)
-4. 수식의 계수도 정확히 같아야 합니다 (1/5 vs 1/5 ✓, 1/5 vs 1/6 ✗)
-5. 이미지에서 도형/그래프에 적힌 숫자가 특히 중요합니다 - 이 숫자들이 반드시 문제 텍스트에 포함되어야 합니다
-
-★★★ 중요 ★★★
-- 이미지(다이어그램)가 진실의 원천(source of truth)입니다
-- 불일치가 있으면 문제 텍스트를 이미지의 숫자에 맞게 수정하세요
-- 문장 구조는 절대 변경하지 마세요
-- 숫자만 이미지에 맞게 교체하세요
-
-JSON으로만 응답하세요:
-모두 일치: {{"match": true, "verified_numbers": ["20m", "16m", "252m²"]}}
-불일치 있음: {{"match": false, "mismatches": [{{"image_value": "20m", "question_value": "14cm", "meaning": "가로 길이", "action": "14cm → 20m"}}], "corrected_question": "이미지 숫자와 정확히 일치하도록 수정한 문제 텍스트"}}"""
-
-            response = model.generate_content([compare_prompt, image_part])
-            response_text = extract_json_from_response(response.text)
-            result = json.loads(response_text)
-
-            if result.get('match', False):
-                verified = result.get('verified_numbers', [])
-                print(f"  [Validation Phase 4] PASSED (attempt {attempt + 1}), verified: {verified}")
-                return current_question
-            else:
-                mismatches = result.get('mismatches', [])
-                corrected = result.get('corrected_question', '')
-                for m in mismatches:
-                    print(f"  [Validation Phase 4] MISMATCH: {m.get('meaning','?')} - "
-                          f"image=\"{m.get('image_value','?')}\", question=\"{m.get('question_value','?')}\", "
-                          f"action=\"{m.get('action','?')}\"")
-
-                if corrected:
-                    # Phase 5: Verify the correction is actually better
-                    corrected_numbers = _extract_numbers_from_text(corrected)
-                    corrected_pure = set()
-                    for val in corrected_numbers:
-                        pure_num, _ = _extract_pure_number(val)
-                        if pure_num:
-                            corrected_pure.add(pure_num)
-
-                    # Check if corrected text has more diagram numbers than before
-                    old_match_count = len(image_pure_numbers & question_pure_numbers)
-                    new_match_count = len(image_pure_numbers & corrected_pure)
-
-                    if new_match_count >= old_match_count:
-                        current_question = corrected
-                        question_pure_numbers = corrected_pure
-                        print(f"  [Validation Phase 5] Correction accepted (attempt {attempt + 1}): "
-                              f"match count {old_match_count} → {new_match_count}")
-                        print(f"  [Validation Phase 5] Corrected text: {current_question[:120]}...")
-                    else:
-                        print(f"  [Validation Phase 5] Correction REJECTED (attempt {attempt + 1}): "
-                              f"match count would decrease {old_match_count} → {new_match_count}")
-                        # Still use the correction since AI may have found contextual issues
-                        current_question = corrected
-                        print(f"  [Validation Phase 5] Using correction anyway (AI context): {current_question[:120]}...")
-                else:
-                    print(f"  [Validation Phase 4] No correction provided (attempt {attempt + 1})")
-                    break
-
-        except Exception as e:
-            print(f"  [Validation Phase 4] Attempt {attempt + 1} error: {e}")
-            break
-
-    # Final local sanity check
-    final_numbers = _extract_numbers_from_text(current_question)
-    final_pure = set()
-    for val in final_numbers:
-        pure_num, _ = _extract_pure_number(val)
-        if pure_num:
-            final_pure.add(pure_num)
-    final_missing = image_pure_numbers - final_pure
-    if final_missing:
-        print(f"  [Validation FINAL] WARNING: Diagram numbers still missing in question: {final_missing}")
-    else:
-        print(f"  [Validation FINAL] All diagram numbers present in final question text")
-
-    return current_question
 
 
 def twin_step2_question_no_diagram(api_key, image_data, mime_type, variation_index=0, num_total=1):
@@ -3931,9 +3717,19 @@ number_changes: 원본→새숫자 형식. 이미지 안의 숫자 변경사항.
     return json.loads(response_text)
 
 
-def twin_step2_solve(api_key, question_text):
+def twin_step2_solve(api_key, question_text, diagram_image_data=None):
     """
-    Step 2: Solve the new problem and get the exact answer.
+    Step 3: Solve the new problem by looking at BOTH the question text and the diagram image.
+
+    When a diagram is present, the AI sees the actual image alongside the text,
+    ensuring it uses the exact numbers visible in the diagram.
+
+    Args:
+        api_key: Gemini API key
+        question_text: The new question text with updated numbers
+        diagram_image_data: (optional) The generated diagram image bytes.
+                           If provided, AI solves using both image + text.
+
     Returns: dict with solution, answer
     """
     genai.configure(api_key=api_key)
@@ -3945,7 +3741,9 @@ def twin_step2_solve(api_key, question_text):
 {question_text}
 
 ★★★ 규칙 ★★★
-- 문제에 있는 숫자를 정확히 사용하세요 (절대 다른 숫자를 사용하지 마세요)
+- 문제 텍스트와 이미지(있는 경우)에 있는 숫자를 정확히 사용하세요
+- 이미지의 도형/그래프에 표시된 숫자와 문제 텍스트의 숫자가 같아야 합니다
+- 절대 다른 숫자를 사용하지 마세요
 - 단계별로 깔끔하게 풀이하세요
 - 최종 정답을 명확하게 제시하세요
 - 풀이 마지막에 검산을 포함하세요 (정답을 원래 식에 대입하여 확인)
@@ -3953,7 +3751,16 @@ def twin_step2_solve(api_key, question_text):
 JSON으로만 응답하세요:
 {{"solution": "단계별 풀이 (LaTeX, 한국어, 검산 포함)", "answer": "최종 정답 (정확한 값)"}}"""
 
-    response = model.generate_content(prompt)
+    # Build content parts: prompt + optional image
+    content_parts = [prompt]
+    if diagram_image_data:
+        image_part = {
+            "mime_type": "image/png",
+            "data": base64.b64encode(diagram_image_data).decode('utf-8')
+        }
+        content_parts.append(image_part)
+
+    response = model.generate_content(content_parts)
     response_text = extract_json_from_response(response.text)
     return json.loads(response_text)
 
@@ -4462,46 +4269,34 @@ def generate_math_twin():
         print(f"  has_graph={has_graph}, is_mcq={is_mcq}")
 
         new_diagram_data = None
-        number_changes = []
+        number_changes = {}
 
         if has_graph:
-            # === DIAGRAM PATH: Steps 1 → 2 → 3 → 4 ===
-
-            # Step 1: Change numbers in the diagram image
-            print("Step 1: Changing numbers in diagram...")
-            new_diagram_data = twin_step1_change_diagram(
+            # === DIAGRAM PATH ===
+            # Step 1: OCR original → decide number changes → generate new diagram
+            print("Step 1: Analyzing original + deciding number changes + generating new diagram...")
+            step1 = twin_step1_change_diagram(
                 api_key=api_key,
-                original_image_data=image_data
-            )
-            if not new_diagram_data:
-                return jsonify({'error': 'Failed to generate new diagram'}), 500
-            print(f"  New diagram generated: {len(new_diagram_data)} bytes")
-
-            # Step 2: Read the new diagram and generate question text from it
-            print("Step 2: Generating question text from new diagram...")
-            step2 = twin_step2_question_from_diagram(
-                api_key=api_key,
-                new_diagram_data=new_diagram_data,
                 original_image_data=image_data,
                 mime_type=mime_type
             )
-            latex_string = step2.get('new_question', '')
-            number_changes = step2.get('number_changes', [])
-            print(f"  Question: {latex_string[:100]}...")
+            new_diagram_data = step1.get('image_data')
+            number_changes = step1.get('number_changes', {})
+            if not new_diagram_data:
+                return jsonify({'error': 'Failed to generate new diagram'}), 500
+            print(f"  New diagram generated: {len(new_diagram_data)} bytes")
             print(f"  Number changes: {number_changes}")
 
-            # Validate: image numbers must match question text
-            print("Validating image vs question numbers...")
-            latex_string = twin_validate_question_vs_image(
+            # Step 2: Deterministic text substitution using known changes
+            print("Step 2: Applying number changes to question text...")
+            step2 = twin_step2_question_from_diagram(
                 api_key=api_key,
-                image_data=new_diagram_data,
-                question_text=latex_string
+                step1_result=step1
             )
-            print(f"  Validated question: {latex_string[:100]}...")
+            latex_string = step2.get('new_question', '')
+            print(f"  New question: {latex_string[:100]}...")
         else:
-            # === NO DIAGRAM PATH: Step 2.2 → 3 → 4 ===
-
-            # Step 2.2: Generate new question with only numbers changed
+            # === NO DIAGRAM PATH ===
             print("Step 2.2: Generating new question (no diagram)...")
             step2 = twin_step2_question_no_diagram(
                 api_key=api_key,
@@ -4512,9 +4307,13 @@ def generate_math_twin():
             number_changes = step2.get('number_changes', [])
             print(f"  Question: {latex_string[:100]}...")
 
-        # === Step 3: Solve the new problem ===
-        print("Step 3: Solving the new problem...")
-        step3 = twin_step3_solve(api_key=api_key, question_text=latex_string)
+        # === Step 3: Solve using BOTH image and question text ===
+        print("Step 3: Solving the new problem (with image + text)...")
+        step3 = twin_step3_solve(
+            api_key=api_key,
+            question_text=latex_string,
+            diagram_image_data=new_diagram_data
+        )
         solution_text = step3.get('solution', '')
         answer = step3.get('answer', '')
         print(f"  Answer: {answer}")
@@ -4529,21 +4328,18 @@ def generate_math_twin():
             answer_number = step4.get('answer_number', 1)
             print(f"  Choices: {choices}, answer_number={answer_number}")
 
-        # === Step 3: Generate question image ===
+        # === Save question image ===
+        # For diagram path: use the diagram already generated in step 1 (numbers are already correct)
+        # For no-diagram path: generate a new text-only image
         generated_image_uuid = None
         try:
-            if has_graph and number_changes:
-                # Graph/diagram exists: edit original image, change numbers + choices
-                print(f"Step 3: Editing original image (changing numbers: {number_changes})...")
-                generated_image_data = generate_twin_image_from_original(
-                    api_key=api_key,
-                    original_image_data=image_data,
-                    number_changes=number_changes,
-                    choices=choices if is_mcq else None
-                )
+            if has_graph and new_diagram_data:
+                # Diagram already generated in step 1 with correct numbers - use it directly
+                print("Using diagram from step 1 as question image...")
+                generated_image_data = new_diagram_data
             else:
                 # No graph: generate new text-only image
-                print(f"Step 3: Generating question image (is_mcq={is_mcq})...")
+                print(f"Generating question image (is_mcq={is_mcq})...")
                 generated_image_data = generate_question_image(
                     api_key=api_key,
                     latex_string=latex_string,
@@ -4656,45 +4452,36 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
         print(f"  {tag} has_graph={has_graph}, is_mcq={is_mcq}")
 
         new_diagram_data = None
-        number_changes = []
+        number_changes = {}
 
         if has_graph:
             # === DIAGRAM PATH ===
-            # Step 1: Change numbers in diagram
-            print(f"  {tag} Step 1: Changing numbers in diagram...")
-            new_diagram_data = twin_step1_change_diagram(
+            # Step 1: OCR original → decide number changes → generate new diagram
+            print(f"  {tag} Step 1: Analyzing + deciding changes + generating diagram...")
+            step1 = twin_step1_change_diagram(
                 api_key=api_key,
                 original_image_data=image_data,
+                mime_type=mime_type,
                 variation_index=variation_index,
                 num_total=num_total
             )
+            new_diagram_data = step1.get('image_data')
+            number_changes = step1.get('number_changes', {})
             if not new_diagram_data:
                 print(f"  {tag} Failed to generate new diagram")
                 return None
             print(f"  {tag} New diagram: {len(new_diagram_data)} bytes")
-
-            # Step 2: Read new diagram → generate question text
-            print(f"  {tag} Step 2: Question from new diagram...")
-            step2 = twin_step2_question_from_diagram(
-                api_key=api_key,
-                new_diagram_data=new_diagram_data,
-                original_image_data=image_data,
-                mime_type=mime_type
-            )
-            latex_string = step2.get('new_question', '')
-            number_changes = step2.get('number_changes', [])
             print(f"  {tag} Number changes: {number_changes}")
 
-            # Validate: image numbers must match question text
-            print(f"  {tag} Validating image vs question numbers...")
-            latex_string = twin_validate_question_vs_image(
+            # Step 2: Deterministic text substitution
+            print(f"  {tag} Step 2: Applying number changes to question text...")
+            step2 = twin_step2_question_from_diagram(
                 api_key=api_key,
-                image_data=new_diagram_data,
-                question_text=latex_string
+                step1_result=step1
             )
+            latex_string = step2.get('new_question', '')
         else:
             # === NO DIAGRAM PATH ===
-            # Step 2.2: Generate new question with only numbers changed
             print(f"  {tag} Step 2.2: New question (no diagram)...")
             step2 = twin_step2_question_no_diagram(
                 api_key=api_key,
@@ -4708,9 +4495,13 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
 
         print(f"  {tag} Question: {latex_string[:80]}...")
 
-        # === Step 3: Solve ===
-        print(f"  {tag} Step 3: Solving...")
-        step3 = twin_step3_solve(api_key=api_key, question_text=latex_string)
+        # === Step 3: Solve using BOTH image and question text ===
+        print(f"  {tag} Step 3: Solving (with image + text)...")
+        step3 = twin_step3_solve(
+            api_key=api_key,
+            question_text=latex_string,
+            diagram_image_data=new_diagram_data
+        )
         solution_text = step3.get('solution', '')
         answer = step3.get('answer', '')
         print(f"  {tag} Answer: {answer}")
@@ -4719,25 +4510,21 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
         choices = []
         answer_number = 1
         if is_mcq:
-            print(f"  [Twin {variation_index+1}] Step 4: Generating choices...")
+            print(f"  {tag} Step 4: Generating choices...")
             step4 = twin_step4_choices(api_key=api_key, question_text=latex_string, answer=answer)
             choices = step4.get('choices', [])
             answer_number = step4.get('answer_number', 1)
-            print(f"  [Twin {variation_index+1}] Choices: {choices}")
+            print(f"  {tag} Choices: {choices}")
 
-        # === Step 3: Generate question image ===
+        # === Save question image ===
         generated_image_url = None
         try:
-            if has_graph and number_changes:
-                print(f"  [Twin {variation_index+1}] Step 3: Editing original image...")
-                generated_image_data = generate_twin_image_from_original(
-                    api_key=api_key,
-                    original_image_data=image_data,
-                    number_changes=number_changes,
-                    choices=choices if is_mcq else None
-                )
+            if has_graph and new_diagram_data:
+                # Diagram already generated in step 1 with correct numbers
+                print(f"  {tag} Using diagram from step 1 as question image...")
+                generated_image_data = new_diagram_data
             else:
-                print(f"  [Twin {variation_index+1}] Step 3: Generating question image...")
+                print(f"  {tag} Generating question image...")
                 generated_image_data = generate_question_image(
                     api_key=api_key,
                     latex_string=latex_string,
@@ -4747,7 +4534,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                 )
 
             if generated_image_data:
-                print(f"  [Twin {variation_index+1}] Verifying image-text consistency...")
+                print(f"  {tag} Verifying image-text consistency...")
                 generated_image_data = verify_image_text_consistency(
                     api_key=api_key,
                     image_data=generated_image_data,
