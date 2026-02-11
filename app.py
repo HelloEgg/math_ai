@@ -3435,70 +3435,104 @@ def ensure_white_background(image_data):
         return image_data
 
 
-def verify_solution(api_key, question_text, solution_text, answer, choices=None):
+def twin_step1_change_numbers(api_key, image_data, mime_type, variation_index=0, num_total=1):
     """
-    Verify that the solution is mathematically correct for the given question.
-    If incorrect, generate a corrected solution.
-
-    Returns:
-        Corrected solution text
+    Step 1: Analyze original problem and change only the numbers.
+    Returns: dict with question, has_graph, is_mcq, number_changes
     """
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-2.0-flash')
 
-        choices_text = ""
-        if choices:
-            choices_text = f"\n\n선택지:\n{chr(10).join(choices)}"
+    variation_hint = ""
+    if num_total > 1:
+        variation_hint = f"""
+★ 변형 {variation_index + 1}/{num_total}: 다른 변형들과 겹치지 않는 숫자를 사용하세요.
+변형마다 숫자를 다르게: 1=약간 줄임, 2=약간 늘림, 3=크게 줄임, 4=크게 늘림."""
 
-        prompt = f"""다음 수학 문제의 풀이가 정확한지 검증하세요.
+    prompt = f"""이 수학 문제 이미지를 분석하세요.
+
+1. 문제의 전체 텍스트를 정확히 읽어서 기록하세요
+2. 숫자(계수, 상수, 좌표값, 각도, 넓이 등)만 바꿔서 새로운 문제를 만드세요
+3. 수식 구조, 변수명, 함수 종류, 문장 구조는 절대 변경하지 마세요
+{variation_hint}
+
+이미지에 그래프/도형/그림이 있는지 확인하세요.
+번호가 매겨진 선택지(객관식)가 있는지 확인하세요.
+
+JSON으로만 응답하세요:
+{{
+    "original_question": "원본 문제 전체 텍스트",
+    "new_question": "숫자만 바꾼 새 문제 전체 텍스트 (LaTeX, 한국어)",
+    "has_graph": true,
+    "is_mcq": true,
+    "number_changes": ["18m → 20m", "14m → 12m", "216m² → 130m²"]
+}}
+
+number_changes: 원본→새숫자 형식. 이미지 안의 숫자 변경사항."""
+
+    image_part = {"mime_type": mime_type, "data": base64.b64encode(image_data).decode('utf-8')}
+    response = model.generate_content([prompt, image_part])
+    response_text = extract_json_from_response(response.text)
+    return json.loads(response_text)
+
+
+def twin_step2_solve(api_key, question_text):
+    """
+    Step 2: Solve the new problem and get the exact answer.
+    Returns: dict with solution, answer
+    """
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-2.0-flash')
+
+    prompt = f"""다음 수학 문제를 처음부터 단계별로 풀어보세요.
 
 문제:
 {question_text}
-{choices_text}
 
-제시된 정답: {answer}
-
-제시된 풀이:
-{solution_text}
-
-★★★ 검증 작업 ★★★
-1. 문제를 처음부터 직접 풀어보세요
-2. 제시된 풀이의 각 단계가 수학적으로 정확한지 확인하세요
-3. 풀이에서 사용한 숫자가 문제의 숫자와 정확히 일치하는지 확인하세요
-4. 최종 정답이 올바른지 확인하세요
+★★★ 규칙 ★★★
+- 문제에 있는 숫자를 정확히 사용하세요 (절대 다른 숫자를 사용하지 마세요)
+- 단계별로 깔끔하게 풀이하세요
+- 최종 정답을 명확하게 제시하세요
+- 풀이 마지막에 검산을 포함하세요 (정답을 원래 식에 대입하여 확인)
 
 JSON으로만 응답하세요:
+{{"solution": "단계별 풀이 (LaTeX, 한국어, 검산 포함)", "answer": "최종 정답 (정확한 값)"}}"""
 
-풀이가 정확하면:
-{{"is_correct": true}}
+    response = model.generate_content(prompt)
+    response_text = extract_json_from_response(response.text)
+    return json.loads(response_text)
 
-풀이가 틀렸으면 (올바른 풀이를 제공):
-{{"is_correct": false, "errors": ["오류 설명"], "correct_solution": "올바른 단계별 풀이 (문제의 숫자와 정확히 일치, LaTeX 형식, 한국어)"}}
 
-중요:
-- correct_solution에서 사용하는 숫자는 문제의 숫자와 정확히 같아야 합니다
-- 풀이는 단계별로 깔끔하게 작성하세요"""
+def twin_step4_choices(api_key, question_text, answer):
+    """
+    Step 4: Generate MCQ choices that include the correct answer.
+    Returns: dict with choices, answer_number
+    """
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-2.0-flash')
 
-        response = model.generate_content(prompt)
-        response_text = extract_json_from_response(response.text)
-        result = json.loads(response_text)
+    prompt = f"""다음 수학 문제의 정답을 포함한 객관식 선택지 5개를 만들어주세요.
 
-        if result.get('is_correct', True):
-            print("Solution verification PASSED")
-            return solution_text
-        else:
-            errors = result.get('errors', [])
-            print(f"Solution verification FAILED: {errors}")
-            corrected = result.get('correct_solution', '')
-            if corrected:
-                print("Using corrected solution")
-                return corrected
-            return solution_text
+문제:
+{question_text}
 
-    except Exception as e:
-        print(f"Solution verification error: {e}")
-        return solution_text
+정답: {answer}
+
+★★★ 규칙 ★★★
+- 정답이 반드시 5개 선택지 중 하나로 포함되어야 합니다
+- 나머지 4개는 정답과 비슷하지만 다른 값 (오답 유인 선택지)
+- 정답이 정수면 나머지도 정수, 정답이 분수면 나머지도 분수
+- 선택지는 오름차순으로 정렬
+- ①②③④⑤ 기호 사용
+
+JSON으로만 응답하세요:
+{{"choices": ["① 값1", "② 값2", "③ 값3", "④ 값4", "⑤ 값5"], "answer_number": 2}}
+
+answer_number는 정답이 들어있는 선택지 번호 (1~5)"""
+
+    response = model.generate_content(prompt)
+    response_text = extract_json_from_response(response.text)
+    return json.loads(response_text)
 
 
 def generate_solution_image(api_key, solution_text):
@@ -3745,95 +3779,6 @@ JSON으로만 응답하세요:
     return image_data
 
 
-def verify_and_fix_twin(api_key, twin_result, max_retries=2):
-    """
-    Verify that a generated twin problem's answer exactly matches one of the choices.
-    If not, ask Gemini to redesign the problem using answer-first approach.
-    """
-    is_mcq = twin_result.get('is_mcq', False)
-    if not is_mcq:
-        return twin_result
-
-    choices = twin_result.get('choices', [])
-    if not choices:
-        return twin_result
-
-    for attempt in range(max_retries):
-        question = twin_result.get('question', '')
-        solution = twin_result.get('solution', '')
-        current_choices = twin_result.get('choices', [])
-
-        try:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-2.0-flash')
-
-            verify_prompt = f"""다음 수학 문제를 검증하세요. 두 가지를 확인합니다.
-
-문제:
-{question}
-
-풀이:
-{solution}
-
-선택지:
-{chr(10).join(current_choices)}
-
-★★★ 검증 1: 문제-풀이 일관성 ★★★
-- 풀이에서 사용한 숫자(계수, 상수항 등)가 문제의 숫자와 정확히 같은지 확인하세요
-- 예: 문제가 "x² - 4x + 2 = 0"인데 풀이가 "x² - 4x + 3 = 0"을 풀었다면 불일치!
-
-★★★ 검증 2: 정답-선택지 일치 ★★★
-- 문제를 직접 풀어서 정답이 선택지 중 하나와 정확히 일치하는지 확인하세요
-- 근사값이 아닌 정확한 값이어야 합니다
-
-JSON으로만 응답하세요:
-
-모두 통과:
-{{"is_valid": true, "my_answer": "계산한 정답", "my_solution": "문제와 일치하는 풀이", "matching_choice_number": 2}}
-
-불일치가 있으면 - 문제의 숫자를 기준으로 정답이 선택지에 있도록 재설계:
-{{"is_valid": false, "my_answer": "현재 계산 결과", "reason": "불일치 내용 설명", "fixed_question": "수정 문제", "fixed_solution": "수정 풀이 (문제와 숫자 완전 일치, 검산 포함)", "fixed_answer": "수정 정답 (선택지와 정확히 일치)", "fixed_choices": ["① 값1", "② 값2", "③ 값3", "④ 값4", "⑤ 값5"], "fixed_answer_number": 2, "fixed_number_changes": ["숫자변경"]}}
-
-수정 규칙:
-- 깔끔한 정답(정수, 간단한 분수)을 먼저 정하고, 그에 맞게 숫자를 역산
-- fixed_solution은 fixed_question의 숫자를 정확히 사용해야 함
-- 문제 구조는 유지, 숫자만 변경"""
-
-            response = model.generate_content(verify_prompt)
-            response_text = extract_json_from_response(response.text)
-            verify_result = json.loads(response_text)
-
-            if verify_result.get('is_valid', False):
-                matching = verify_result.get('matching_choice_number')
-                my_answer = verify_result.get('my_answer', '')
-                my_solution = verify_result.get('my_solution', '')
-                print(f"Twin verification PASSED (attempt {attempt + 1}): answer={my_answer}, choice={matching}")
-                if matching:
-                    twin_result['answer_number'] = matching
-                if my_answer:
-                    twin_result['answer'] = my_answer
-                if my_solution:
-                    twin_result['solution'] = my_solution
-                return twin_result
-            else:
-                print(f"Twin verification FAILED (attempt {attempt + 1}): {verify_result.get('reason', '?')}")
-                print(f"  Computed: {verify_result.get('my_answer', '?')}")
-
-                # Apply fix
-                for key_map in [('fixed_question', 'question'), ('fixed_solution', 'solution'),
-                                ('fixed_answer', 'answer'), ('fixed_choices', 'choices'),
-                                ('fixed_answer_number', 'answer_number'), ('fixed_number_changes', 'number_changes')]:
-                    if verify_result.get(key_map[0]):
-                        twin_result[key_map[1]] = verify_result[key_map[0]]
-
-                print(f"  Applied fix, will re-verify...")
-
-        except Exception as e:
-            print(f"Verification attempt {attempt + 1} error: {e}")
-            break
-
-    return twin_result
-
 
 def generate_question_image(api_key, latex_string, choices=None, graph_description=None, has_graph=False):
     """
@@ -4048,114 +3993,56 @@ def generate_math_twin():
         mime_type = 'image/jpeg'
 
     try:
-        # Configure Gemini API
-        genai.configure(api_key=app.config['GEMINI_API_KEY'])
+        api_key = app.config['GEMINI_API_KEY']
 
-        # Create the model for analysis
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        # === Step 1: Change numbers only ===
+        print("Step 1: Changing numbers in original problem...")
+        step1 = twin_step1_change_numbers(
+            api_key=api_key,
+            image_data=image_data,
+            mime_type=mime_type
+        )
+        latex_string = step1.get('new_question', '')
+        has_graph = step1.get('has_graph', False)
+        is_mcq = step1.get('is_mcq', False)
+        number_changes = step1.get('number_changes', [])
+        print(f"  New question: {latex_string[:100]}...")
+        print(f"  has_graph={has_graph}, is_mcq={is_mcq}, changes={number_changes}")
 
-        # Create the prompt - Korean version with choices support
-        prompt = """이 수학 문제 이미지를 분석하고 "쌍둥이" 문제를 생성하세요.
+        # === Step 2: Solve the new problem ===
+        print("Step 2: Solving the new problem...")
+        step2 = twin_step2_solve(api_key=api_key, question_text=latex_string)
+        solution_text = step2.get('solution', '')
+        answer = step2.get('answer', '')
+        print(f"  Answer: {answer}")
 
-★★★ 절대 규칙: 정답이 선택지에 정확히 있어야 합니다 ★★★
+        # === Step 4: Generate MCQ choices (if applicable) ===
+        choices = []
+        answer_number = 1
+        if is_mcq:
+            print("Step 4: Generating MCQ choices...")
+            step4 = twin_step4_choices(api_key=api_key, question_text=latex_string, answer=answer)
+            choices = step4.get('choices', [])
+            answer_number = step4.get('answer_number', 1)
+            print(f"  Choices: {choices}, answer_number={answer_number}")
 
-작업 순서 (반드시 이 순서대로):
-1단계: 원본 문제를 완전히 분석하고, 풀이 구조를 이해하세요
-2단계: 정답으로 사용할 깔끔한 값을 먼저 선택하세요 (정수, 간단한 분수 등)
-3단계: 선택한 정답이 나오도록 문제의 숫자를 역으로 계산하여 결정하세요
-  - 예: 정답을 2m로 정했다면, x=2를 방정식에 대입하여 나머지 숫자(넓이 등)를 결정
-  - 예: 정답을 50°로 정했다면, 각도 관계식에서 나머지 각도를 역산
-4단계: 결정된 숫자로 문제를 처음부터 풀어서 정답이 정확히 맞는지 검산하세요
-5단계: 정답을 포함한 5개의 선택지를 만드세요
-
-★ 절대 금지: 숫자를 먼저 바꾸고 풀어보는 방식 (정답이 무리수가 될 수 있음) ★
-★ 정답은 정수, 간단한 분수(1/2, 3/4 등) 같은 깔끔한 값이어야 합니다 ★
-★ answer의 값은 choices 중 하나와 정확히 같아야 합니다 ★
-
-★★★ 문제-풀이 일관성 (필수) ★★★
-- solution(풀이)은 반드시 question(문제)에 있는 정확히 같은 숫자를 사용해야 합니다
-- 문제의 상수항이 2이면, 풀이에서도 반드시 상수항 2로 풀어야 합니다
-- 문제와 풀이의 숫자가 하나라도 다르면 절대 안 됩니다
-- question을 작성한 후, solution에서 question의 모든 숫자를 그대로 가져와서 풀이하세요
-
-숫자 변경 규칙:
-- 수식의 구조, 형태, 변수명은 절대 변경하지 마세요
-- 오직 숫자(계수, 상수, 좌표값, 각도, 넓이 등)만 변경하세요
-- 문장 구조와 질문 형태는 원본 그대로 유지하세요
-
-그래프/도형이 있는 경우:
-- 도형의 구조는 원본과 완전히 동일하게 유지
-- number_changes에 변경할 숫자를 기록 (문제 텍스트 + 이미지 안의 숫자 모두)
-
-다음 JSON 형식으로만 응답하세요 (마크다운 없이, 코드 블록 없이, 순수 JSON만):
-{
-    "question": "쌍둥이 수학 문제 전체 텍스트 (LaTeX, 한국어)",
-    "answer": "정답 값 (choices 중 하나와 정확히 동일)",
-    "answer_number": 2,
-    "solution": "단계별 풀이 + 검산 (LaTeX, 한국어)",
-    "is_mcq": true,
-    "choices": ["① 값1", "② 값2", "③ 값3", "④ 값4", "⑤ 값5"],
-    "has_graph": true,
-    "number_changes": ["18m → 20m", "14m → 12m", "216m² → 128m²"]
-}
-
-중요 지침:
-- ★ answer 값은 반드시 choices의 ①~⑤ 중 하나와 정확히 일치해야 합니다 ★
-- answer_number는 정답 선택지 번호 (1~5)
-- number_changes는 이미지 안 숫자의 변경사항 (그래프/도형 있을 때만)
-- has_graph가 false이면 number_changes는 빈 배열
-- solution에 검산 과정을 반드시 포함하세요
-- 유효한 JSON만 응답하세요"""
-
-        # Prepare the image for Gemini
-        image_part = {
-            "mime_type": mime_type,
-            "data": base64.b64encode(image_data).decode('utf-8')
-        }
-
-        # Generate response
-        response = model.generate_content([prompt, image_part])
-
-        # Parse the response
-        response_text = extract_json_from_response(response.text)
-
-        # Parse JSON response
-        result = json.loads(response_text)
-
-        # Validate required fields
-        if 'question' not in result or 'answer' not in result or 'solution' not in result:
-            return jsonify({
-                'error': 'Invalid response from Gemini API',
-                'raw_response': response.text
-            }), 500
-
-        # Verify and fix: ensure answer matches a choice (for MCQ)
-        result = verify_and_fix_twin(app.config['GEMINI_API_KEY'], result)
-
-        # Extract question data
-        latex_string = result.get('question', '')
-        choices = result.get('choices', [])
-        has_graph = result.get('has_graph', False)
-        number_changes = result.get('number_changes', [])
-        is_mcq = result.get('is_mcq', False)
-
-        # Generate question image
+        # === Step 3: Generate question image ===
         generated_image_uuid = None
         try:
             if has_graph and number_changes:
                 # Graph/diagram exists: edit original image, change numbers + choices
-                print(f"Editing original image (changing numbers: {number_changes}, choices: {len(choices)})...")
+                print(f"Step 3: Editing original image (changing numbers: {number_changes})...")
                 generated_image_data = generate_twin_image_from_original(
-                    api_key=app.config['GEMINI_API_KEY'],
+                    api_key=api_key,
                     original_image_data=image_data,
                     number_changes=number_changes,
                     choices=choices if is_mcq else None
                 )
             else:
                 # No graph: generate new text-only image
-                print(f"Generating question image (is_mcq={is_mcq}, choices={len(choices)})...")
+                print(f"Step 3: Generating question image (is_mcq={is_mcq})...")
                 generated_image_data = generate_question_image(
-                    api_key=app.config['GEMINI_API_KEY'],
+                    api_key=api_key,
                     latex_string=latex_string,
                     choices=choices if is_mcq else None,
                     graph_description=None,
@@ -4166,12 +4053,11 @@ def generate_math_twin():
                 # Verify image-text consistency before saving
                 print("Verifying image-text consistency...")
                 generated_image_data = verify_image_text_consistency(
-                    api_key=app.config['GEMINI_API_KEY'],
+                    api_key=api_key,
                     image_data=generated_image_data,
                     question_text=latex_string,
                     choices=choices if is_mcq else None
                 )
-                # Save generated image to disk
                 generated_image_uuid = str(uuid.uuid4())
                 image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
                 with open(image_path, 'wb') as f:
@@ -4179,30 +4065,16 @@ def generate_math_twin():
                 print(f"Saved generated question image: {generated_image_uuid}")
             else:
                 print("Question image generation returned no data")
-
         except Exception as e:
-            # If image generation fails, continue without it
             print(f"Warning: Question image generation failed: {e}")
 
-        # Generate a separate solution-only image (no question text)
+        # === Generate solution image ===
         solution_image_uuid = None
         try:
-            solution_text = result.get('solution', '')
             if solution_text:
-                # Verify solution correctness before generating image
-                print("Verifying solution correctness...")
-                solution_text = verify_solution(
-                    api_key=app.config['GEMINI_API_KEY'],
-                    question_text=latex_string,
-                    solution_text=solution_text,
-                    answer=result.get('answer', ''),
-                    choices=choices if is_mcq else None
-                )
-                result['solution'] = solution_text
-
                 print("Generating solution-only image...")
                 solution_image_data = generate_solution_image(
-                    api_key=app.config['GEMINI_API_KEY'],
+                    api_key=api_key,
                     solution_text=solution_text
                 )
                 if solution_image_data:
@@ -4218,8 +4090,9 @@ def generate_math_twin():
 
         response_data = {
             'question': latex_string,
-            'answer': result['answer'],
-            'solution': result['solution'],
+            'answer': answer,
+            'answer_number': answer_number,
+            'solution': solution_text,
             'is_mcq': is_mcq,
             'choices': choices,
             'has_graph': has_graph,
@@ -4235,8 +4108,7 @@ def generate_math_twin():
     except json.JSONDecodeError as e:
         return jsonify({
             'error': 'Failed to parse Gemini response as JSON',
-            'details': str(e),
-            'raw_response': response.text if 'response' in locals() else None
+            'details': str(e)
         }), 500
     except Exception as e:
         return jsonify({
@@ -4260,7 +4132,7 @@ def download_image_from_url(url):
 
 def generate_single_twin(api_key, image_data, original_url, base_url, variation_index=0, num_total=1):
     """
-    Generate a single twin question from image data.
+    Generate a single twin question from image data using 4-step sequential approach.
     variation_index and num_total are used to ensure each twin uses different numbers.
     Returns formatted response dict or None if failed.
     """
@@ -4271,102 +4143,43 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
         if mime_type == "image/jpeg":
             mime_type = "image/jpeg"
 
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        # === Step 1: Change numbers only ===
+        print(f"  [Twin {variation_index+1}/{num_total}] Step 1: Changing numbers...")
+        step1 = twin_step1_change_numbers(
+            api_key=api_key,
+            image_data=image_data,
+            mime_type=mime_type,
+            variation_index=variation_index,
+            num_total=num_total
+        )
+        latex_string = step1.get('new_question', '')
+        has_graph = step1.get('has_graph', False)
+        is_mcq = step1.get('is_mcq', False)
+        number_changes = step1.get('number_changes', [])
+        print(f"  [Twin {variation_index+1}] New question: {latex_string[:80]}...")
 
-        variation_hint = ""
-        if num_total > 1:
-            variation_hint = f"""
+        # === Step 2: Solve the new problem ===
+        print(f"  [Twin {variation_index+1}] Step 2: Solving...")
+        step2 = twin_step2_solve(api_key=api_key, question_text=latex_string)
+        solution_text = step2.get('solution', '')
+        answer = step2.get('answer', '')
+        print(f"  [Twin {variation_index+1}] Answer: {answer}")
 
-★★★ 변형 번호: {variation_index + 1}/{num_total} ★★★
-이 문제는 같은 원본에서 총 {num_total}개의 서로 다른 쌍둥이를 만드는 중입니다.
-현재 {variation_index + 1}번째 변형입니다.
-반드시 다른 변형들과 겹치지 않는 숫자 조합을 사용하세요.
-- 변형 1: 숫자를 약간 줄이는 방향 (예: 40→35, 60→55)
-- 변형 2: 숫자를 약간 늘리는 방향 (예: 40→45, 60→65)
-- 변형 3: 숫자를 크게 줄이는 방향 (예: 40→25, 60→50)
-- 변형 4: 숫자를 크게 늘리는 방향 (예: 40→50, 60→75)
-- 변형 5 이상: 위 패턴을 참고하되 다양하게 변경
-현재 변형 {variation_index + 1}에 맞는 숫자 조합을 선택하세요."""
+        # === Step 4: Generate MCQ choices (if applicable) ===
+        choices = []
+        answer_number = 1
+        if is_mcq:
+            print(f"  [Twin {variation_index+1}] Step 4: Generating choices...")
+            step4 = twin_step4_choices(api_key=api_key, question_text=latex_string, answer=answer)
+            choices = step4.get('choices', [])
+            answer_number = step4.get('answer_number', 1)
+            print(f"  [Twin {variation_index+1}] Choices: {choices}")
 
-        prompt = f"""이 수학 문제 이미지를 분석하고 "쌍둥이" 문제를 생성하세요.
-
-★★★ 절대 규칙: 정답이 선택지에 정확히 있어야 합니다 ★★★
-
-작업 순서 (반드시 이 순서대로):
-1단계: 원본 문제를 완전히 분석하고, 풀이 구조를 이해하세요
-2단계: 정답으로 사용할 깔끔한 값을 먼저 선택하세요 (정수, 간단한 분수 등)
-3단계: 선택한 정답이 나오도록 문제의 숫자를 역으로 계산하여 결정하세요
-  - 예: 정답을 2m로 정했다면, x=2를 방정식에 대입하여 나머지 숫자(넓이 등)를 결정
-  - 예: 정답을 50°로 정했다면, 각도 관계식에서 나머지 각도를 역산
-4단계: 결정된 숫자로 문제를 처음부터 풀어서 정답이 정확히 맞는지 검산하세요
-5단계: 정답을 포함한 5개의 선택지를 만드세요
-
-★ 절대 금지: 숫자를 먼저 바꾸고 풀어보는 방식 (정답이 무리수가 될 수 있음) ★
-★ 정답은 정수, 간단한 분수(1/2, 3/4 등) 같은 깔끔한 값이어야 합니다 ★
-★ answer의 값은 choices 중 하나와 정확히 같아야 합니다 ★
-
-★★★ 문제-풀이 일관성 (필수) ★★★
-- solution(풀이)은 반드시 question(문제)에 있는 정확히 같은 숫자를 사용해야 합니다
-- 문제의 상수항이 2이면, 풀이에서도 반드시 상수항 2로 풀어야 합니다
-- 문제와 풀이의 숫자가 하나라도 다르면 절대 안 됩니다
-- question을 작성한 후, solution에서 question의 모든 숫자를 그대로 가져와서 풀이하세요
-{variation_hint}
-
-숫자 변경 규칙:
-- 수식의 구조, 형태, 변수명은 절대 변경하지 마세요
-- 오직 숫자(계수, 상수, 좌표값, 각도, 넓이 등)만 변경하세요
-- 문장 구조와 질문 형태는 원본 그대로 유지하세요
-
-그래프/도형이 있는 경우:
-- 도형의 구조는 원본과 완전히 동일하게 유지
-- number_changes에 변경할 숫자를 기록 (문제 텍스트 + 이미지 안의 숫자 모두)
-
-다음 JSON 형식으로만 응답하세요 (마크다운 없이, 코드 블록 없이, 순수 JSON만):
-{{
-    "question": "쌍둥이 수학 문제 전체 텍스트 (LaTeX, 한국어)",
-    "answer": "정답 값 (choices 중 하나와 정확히 동일)",
-    "answer_number": 2,
-    "solution": "단계별 풀이 + 검산 (LaTeX, 한국어)",
-    "is_mcq": true,
-    "choices": ["① 값1", "② 값2", "③ 값3", "④ 값4", "⑤ 값5"],
-    "has_graph": true,
-    "number_changes": ["18m → 20m", "14m → 12m", "216m² → 128m²"]
-}}
-
-중요 지침:
-- ★ answer 값은 반드시 choices의 ①~⑤ 중 하나와 정확히 일치해야 합니다 ★
-- answer_number는 정답 선택지 번호 (1~5)
-- number_changes는 이미지 안 숫자의 변경사항 (그래프/도형 있을 때만)
-- has_graph가 false이면 number_changes는 빈 배열
-- solution에 검산 과정을 반드시 포함하세요
-- 유효한 JSON만 응답하세요"""
-
-        image_part = {
-            "mime_type": mime_type,
-            "data": base64.b64encode(image_data).decode('utf-8')
-        }
-
-        response = model.generate_content([prompt, image_part])
-        response_text = extract_json_from_response(response.text)
-        result = json.loads(response_text)
-
-        # Verify and fix: ensure answer matches a choice (for MCQ)
-        result = verify_and_fix_twin(api_key, result)
-
-        # Extract question data
-        latex_string = result.get('question', '')
-        choices = result.get('choices', [])
-        has_graph = result.get('has_graph', False)
-        number_changes = result.get('number_changes', [])
-        is_mcq = result.get('is_mcq', True)
-
-        # Generate question image
+        # === Step 3: Generate question image ===
         generated_image_url = None
         try:
             if has_graph and number_changes:
-                # Graph/diagram exists: edit original image, change numbers + choices
-                print(f"Editing original image (changing numbers: {number_changes}, choices: {len(choices)})...")
+                print(f"  [Twin {variation_index+1}] Step 3: Editing original image...")
                 generated_image_data = generate_twin_image_from_original(
                     api_key=api_key,
                     original_image_data=image_data,
@@ -4374,8 +4187,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                     choices=choices if is_mcq else None
                 )
             else:
-                # No graph: generate new text-only image
-                print(f"Generating question image (is_mcq={is_mcq}, choices={len(choices)})...")
+                print(f"  [Twin {variation_index+1}] Step 3: Generating question image...")
                 generated_image_data = generate_question_image(
                     api_key=api_key,
                     latex_string=latex_string,
@@ -4385,8 +4197,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                 )
 
             if generated_image_data:
-                # Verify image-text consistency before saving
-                print("Verifying image-text consistency...")
+                print(f"  [Twin {variation_index+1}] Verifying image-text consistency...")
                 generated_image_data = verify_image_text_consistency(
                     api_key=api_key,
                     image_data=generated_image_data,
@@ -4398,29 +4209,17 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                 with open(image_path, 'wb') as f:
                     f.write(generated_image_data)
                 generated_image_url = f"{base_url}/math_twin/images/{generated_image_uuid}"
-                print(f"Saved question image: {generated_image_uuid}")
+                print(f"  [Twin {variation_index+1}] Saved question image: {generated_image_uuid}")
             else:
-                print("Question image generation returned no data")
+                print(f"  [Twin {variation_index+1}] Question image generation returned no data")
         except Exception as e:
-            print(f"Warning: Question image generation failed: {e}")
+            print(f"  [Twin {variation_index+1}] Warning: Question image generation failed: {e}")
 
-        # Generate a separate solution-only image (no question text)
+        # === Generate solution image ===
         solution_image_url = None
         try:
-            solution_text = result.get('solution', '')
             if solution_text:
-                # Verify solution correctness before generating image
-                print("Verifying solution correctness...")
-                solution_text = verify_solution(
-                    api_key=api_key,
-                    question_text=latex_string,
-                    solution_text=solution_text,
-                    answer=result.get('answer', result.get('answer_number', '')),
-                    choices=choices if is_mcq else None
-                )
-                result['solution'] = solution_text
-
-                print("Generating solution-only image...")
+                print(f"  [Twin {variation_index+1}] Generating solution image...")
                 solution_image_data = generate_solution_image(
                     api_key=api_key,
                     solution_text=solution_text
@@ -4431,21 +4230,21 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                     with open(solution_image_path, 'wb') as f:
                         f.write(solution_image_data)
                     solution_image_url = f"{base_url}/math_twin/images/{solution_image_uuid}"
-                    print(f"Saved solution image: {solution_image_uuid}")
+                    print(f"  [Twin {variation_index+1}] Saved solution image: {solution_image_uuid}")
                 else:
-                    print("Solution image generation returned no data")
+                    print(f"  [Twin {variation_index+1}] Solution image generation returned no data")
         except Exception as e:
-            print(f"Warning: Solution image generation failed: {e}")
+            print(f"  [Twin {variation_index+1}] Warning: Solution image generation failed: {e}")
 
         return {
             "latexString": latex_string,
-            "answerString": result.get('solution', ''),
+            "answerString": solution_text,
             "originalImageURL": original_url,
             "questionImageUrl": generated_image_url,
             "answerImageUrl": solution_image_url if solution_image_url else generated_image_url,
             "isMCQ": is_mcq,
             "choices": choices,
-            "answer": result.get('answer_number', 1)
+            "answer": answer_number
         }
 
     except Exception as e:
