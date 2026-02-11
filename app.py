@@ -194,7 +194,7 @@ def extract_latex_from_image(image_data, api_key):
             mime_type = "image/jpeg"
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        model = genai.GenerativeModel('gemini-3-pro-preview')
 
         prompt = """Extract ALL text and mathematical content from this math problem image.
 
@@ -243,7 +243,7 @@ def extract_text_from_image(image_data, api_key):
             mime_type = "image/jpeg"
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        model = genai.GenerativeModel('gemini-3-pro-preview')
 
         prompt = """Extract ALL text content from this image exactly as it appears.
 
@@ -3441,7 +3441,7 @@ def twin_step0_check_diagram(api_key, image_data, mime_type):
     Returns: dict with has_graph, is_mcq
     """
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel('gemini-3-pro-preview')
 
     prompt = """이 수학 문제 이미지를 보고 다음을 판단하세요:
 
@@ -3527,7 +3527,7 @@ def twin_step2_question_from_diagram(api_key, new_diagram_data, original_image_d
     Returns: dict with new_question
     """
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel('gemini-3-pro-preview')
 
     prompt = """두 개의 이미지가 주어집니다:
 1번 이미지: 원본 수학 문제
@@ -3569,7 +3569,7 @@ def twin_validate_question_vs_image(api_key, image_data, question_text, max_retr
     for attempt in range(max_retries):
         try:
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-2.0-flash')
+            model = genai.GenerativeModel('gemini-3-pro-preview')
 
             validate_prompt = f"""이 이미지를 보고, 아래 문제 텍스트의 숫자가 이미지 안의 숫자와 정확히 일치하는지 검증하세요.
 
@@ -3624,7 +3624,7 @@ def twin_step2_question_no_diagram(api_key, image_data, mime_type, variation_ind
     Returns: dict with new_question
     """
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel('gemini-3-pro-preview')
 
     variation_hint = ""
     if num_total > 1:
@@ -3656,7 +3656,7 @@ def twin_step3_solve(api_key, question_text):
     Returns: dict with solution, answer
     """
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel('gemini-3-pro-preview')
 
     prompt = f"""다음 수학 문제를 처음부터 단계별로 풀어보세요.
 
@@ -3683,7 +3683,7 @@ def twin_step4_choices(api_key, question_text, answer):
     Returns: dict with choices, answer_number
     """
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel('gemini-3-pro-preview')
 
     prompt = f"""다음 수학 문제의 정답을 포함한 객관식 선택지 5개를 만들어주세요.
 
