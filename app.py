@@ -3522,44 +3522,73 @@ def twin_step1_change_diagram(api_key, original_image_data, variation_index=0, n
 
 def twin_step2_question_from_diagram(api_key, new_diagram_data, original_image_data, mime_type):
     """
-    Step 2 (diagram exists): Read the new diagram and generate question text matching it exactly.
-    The question structure should be the same as the original, only numbers differ.
+    Step 2 (diagram exists):
+    1. OCR the original image → get original question text + numbers
+    2. OCR the new diagram → get new numbers
+    3. Substitute numbers in original text → new question text
     Returns: dict with new_question
     """
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-3-pro-preview')
 
-    prompt = """두 개의 이미지가 주어집니다:
-1번 이미지: 원본 수학 문제
-2번 이미지: 숫자만 변경된 새 수학 문제 (도형/그래프 구조는 동일)
+    # Step 2a: OCR original image - get full text and all numbers
+    ocr_prompt = """이 수학 문제 이미지를 완전히 읽어주세요.
 
-★★★ 작업 ★★★
-2번 이미지(새 이미지)를 보고, 문제 텍스트를 LaTeX 형식으로 정확하게 작성하세요.
-- 2번 이미지에 보이는 모든 숫자를 정확히 읽어서 사용하세요
-- 1번 이미지(원본)의 문장 구조를 참고하되, 숫자는 반드시 2번 이미지의 숫자를 사용하세요
-- 선택지는 포함하지 마세요 (나중에 별도로 생성됩니다)
+1. 문제 텍스트를 정확히 읽으세요 (선택지 제외)
+2. 이미지 안(도형/그래프 포함)에 보이는 모든 숫자를 빠짐없이 추출하세요
 
 JSON으로만 응답하세요:
-{"new_question": "2번 이미지의 숫자를 사용한 문제 전체 텍스트 (LaTeX, 한국어)"}"""
+{"question_text": "문제 전체 텍스트 (LaTeX, 한국어, 선택지 제외)", "numbers_in_image": ["18m", "14m", "216m²"]}
+
+numbers_in_image: 이미지에 보이는 모든 숫자 (단위 포함)"""
 
     original_part = {"mime_type": mime_type, "data": base64.b64encode(original_image_data).decode('utf-8')}
-    new_part = {"mime_type": "image/png", "data": base64.b64encode(new_diagram_data).decode('utf-8')}
+    response1 = model.generate_content([ocr_prompt, original_part])
+    original_ocr = json.loads(extract_json_from_response(response1.text))
+    original_text = original_ocr.get('question_text', '')
+    original_numbers = original_ocr.get('numbers_in_image', [])
+    print(f"  Original OCR: text={original_text[:80]}..., numbers={original_numbers}")
 
-    response = model.generate_content([prompt, original_part, new_part])
-    response_text = extract_json_from_response(response.text)
-    return json.loads(response_text)
+    # Step 2b: OCR new diagram - get all numbers
+    new_ocr_prompt = """이 수학 문제 이미지에서 보이는 모든 숫자를 읽어주세요.
+도형/그래프 안의 숫자, 문제 텍스트의 숫자 모두 포함합니다.
+
+JSON으로만 응답하세요:
+{"numbers_in_image": ["20m", "16m", "252m²"]}"""
+
+    new_part = {"mime_type": "image/png", "data": base64.b64encode(new_diagram_data).decode('utf-8')}
+    response2 = model.generate_content([new_ocr_prompt, new_part])
+    new_ocr = json.loads(extract_json_from_response(response2.text))
+    new_numbers = new_ocr.get('numbers_in_image', [])
+    print(f"  New diagram numbers: {new_numbers}")
+
+    # Step 2c: Ask Gemini to substitute numbers in original text
+    substitute_prompt = f"""원본 문제 텍스트에서 숫자만 교체하세요.
+
+원본 문제 텍스트:
+{original_text}
+
+원본 이미지의 숫자들: {original_numbers}
+새 이미지의 숫자들: {new_numbers}
+
+★★★ 규칙 ★★★
+- 원본 텍스트의 문장 구조, 수식 구조, 변수명은 절대 변경하지 마세요
+- 원본 숫자를 새 숫자로 1:1 대응하여 교체만 하세요
+- 새 이미지의 숫자를 정확히 사용하세요
+- 선택지는 포함하지 마세요
+
+JSON으로만 응답하세요:
+{{"new_question": "숫자만 교체된 새 문제 텍스트 (LaTeX, 한국어)"}}"""
+
+    response3 = model.generate_content(substitute_prompt)
+    result = json.loads(extract_json_from_response(response3.text))
+    return result
 
 
 def twin_validate_question_vs_image(api_key, image_data, question_text, max_retries=2):
     """
-    Validate that ALL numbers in the generated image match the question text exactly.
-    If mismatch, re-read the image and regenerate the question text.
-
-    Args:
-        api_key: Gemini API key
-        image_data: Generated diagram image data
-        question_text: The question text to validate
-        max_retries: Max retries if mismatch found
+    Validate that ALL numbers in the generated image match the question text.
+    If mismatch, correct the question text by re-reading image numbers.
 
     Returns:
         Corrected question text (matching the image exactly)
@@ -3571,21 +3600,19 @@ def twin_validate_question_vs_image(api_key, image_data, question_text, max_retr
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel('gemini-3-pro-preview')
 
-            validate_prompt = f"""이 이미지를 보고, 아래 문제 텍스트의 숫자가 이미지 안의 숫자와 정확히 일치하는지 검증하세요.
+            validate_prompt = f"""이 이미지와 아래 문제 텍스트의 숫자가 정확히 일치하는지 검증하세요.
 
 문제 텍스트:
 {current_question}
 
 ★★★ 검증 방법 ★★★
-1. 이미지 안에 보이는 모든 숫자를 읽으세요 (길이, 각도, 좌표, 넓이, 계수 등)
-2. 문제 텍스트에 있는 숫자와 하나하나 비교하세요
-3. 단위도 확인하세요 (m, cm, °, m² 등)
+1. 이미지 안에 보이는 모든 숫자를 하나씩 읽으세요 (길이, 각도, 좌표, 넓이, 계수, 단위 포함)
+2. 문제 텍스트에 있는 숫자들과 하나하나 대조하세요
+3. 하나라도 다르면 불일치입니다
 
 JSON으로만 응답하세요:
-일치하면: {{"match": true}}
-불일치하면: {{"match": false, "image_numbers": ["16m", "12m", "154m²"], "question_numbers": ["14cm", "11cm", "154m²"], "corrected_question": "이미지 숫자에 맞게 수정된 문제 텍스트 (LaTeX, 한국어)"}}
-
-★ 불일치 시, corrected_question은 이미지에 보이는 숫자를 정확히 사용해야 합니다 ★"""
+일치: {{"match": true}}
+불일치: {{"match": false, "image_numbers": ["20m", "16m"], "question_numbers": ["14cm", "11cm"], "corrected_question": "이미지의 숫자로 교체한 문제 텍스트 (문장 구조는 유지, 숫자만 교체)"}}"""
 
             image_part = {
                 "mime_type": "image/png",
@@ -3597,7 +3624,7 @@ JSON으로만 응답하세요:
             result = json.loads(response_text)
 
             if result.get('match', False):
-                print(f"  Validation PASSED (attempt {attempt + 1}): image numbers match question")
+                print(f"  Validation PASSED (attempt {attempt + 1})")
                 return current_question
             else:
                 image_nums = result.get('image_numbers', [])
@@ -3607,9 +3634,7 @@ JSON으로만 응답하세요:
 
                 if corrected:
                     current_question = corrected
-                    print(f"  Corrected question: {current_question[:100]}...")
-                else:
-                    print(f"  No corrected question provided, keeping current")
+                    print(f"  Corrected: {current_question[:100]}...")
 
         except Exception as e:
             print(f"  Validation attempt {attempt + 1} error: {e}")
