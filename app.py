@@ -3435,10 +3435,10 @@ def ensure_white_background(image_data):
         return image_data
 
 
-def twin_step0_check_diagram(api_key, image_data, mime_type):
+def twin_step1_change_numbers(api_key, image_data, mime_type, variation_index=0, num_total=1):
     """
-    Step 0: Check if the original image has a diagram/graph and if it's MCQ.
-    Returns: dict with has_graph, is_mcq
+    Step 1: Analyze original problem and change only the numbers.
+    Returns: dict with question, has_graph, is_mcq, number_changes
     """
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-3-pro-preview')
@@ -3695,17 +3695,26 @@ def twin_step2_question_no_diagram(api_key, image_data, mime_type, variation_ind
 ★ 변형 {variation_index + 1}/{num_total}: 다른 변형들과 겹치지 않는 숫자를 사용하세요.
 변형마다 숫자를 다르게: 1=약간 줄임, 2=약간 늘림, 3=크게 줄임, 4=크게 늘림."""
 
-    prompt = f"""이 수학 문제 이미지를 읽고, 숫자만 바꾼 새로운 문제를 만드세요.
+    prompt = f"""이 수학 문제 이미지를 분석하세요.
 
-★★★ 규칙 ★★★
-- 문제를 완전히 OCR로 읽으세요
-- 수식 구조, 변수명, 함수 종류, 문장 구조는 절대 변경하지 마세요
-- 오직 숫자(계수, 상수, 좌표값, 각도, 넓이 등)만 변경하세요
-- 선택지(①②③④⑤)는 포함하지 마세요 (나중에 별도로 생성됩니다)
+1. 문제의 전체 텍스트를 정확히 읽어서 기록하세요
+2. 숫자(계수, 상수, 좌표값, 각도, 넓이 등)만 바꿔서 새로운 문제를 만드세요
+3. 수식 구조, 변수명, 함수 종류, 문장 구조는 절대 변경하지 마세요
 {variation_hint}
 
+이미지에 그래프/도형/그림이 있는지 확인하세요.
+번호가 매겨진 선택지(객관식)가 있는지 확인하세요.
+
 JSON으로만 응답하세요:
-{{"new_question": "숫자만 바꾼 새 문제 전체 텍스트 (LaTeX, 한국어, 선택지 제외)"}}"""
+{{
+    "original_question": "원본 문제 전체 텍스트",
+    "new_question": "숫자만 바꾼 새 문제 전체 텍스트 (LaTeX, 한국어)",
+    "has_graph": true,
+    "is_mcq": true,
+    "number_changes": ["18m → 20m", "14m → 12m", "216m² → 130m²"]
+}}
+
+number_changes: 원본→새숫자 형식. 이미지 안의 숫자 변경사항."""
 
     image_part = {"mime_type": mime_type, "data": base64.b64encode(image_data).decode('utf-8')}
     response = model.generate_content([prompt, image_part])
@@ -3713,9 +3722,9 @@ JSON으로만 응답하세요:
     return json.loads(response_text)
 
 
-def twin_step3_solve(api_key, question_text):
+def twin_step2_solve(api_key, question_text):
     """
-    Step 3: Solve the new problem and get the exact answer.
+    Step 2: Solve the new problem and get the exact answer.
     Returns: dict with solution, answer
     """
     genai.configure(api_key=api_key)
@@ -3829,7 +3838,191 @@ def generate_solution_image(api_key, solution_text):
         return None
 
 
+def generate_twin_image_from_original(api_key, original_image_data, number_changes, choices=None):
+    """
+    Generate a twin question image by editing numbers on the original image.
+    Keeps the graph/diagram structure identical, only replaces specified numbers.
+    Also updates choices in the image if provided.
 
+    Args:
+        api_key: Gemini API key
+        original_image_data: Original image data as bytes
+        number_changes: List of number change descriptions, e.g. ["40° → 30°", "60° → 70°"]
+        choices: List of new choices to display, e.g. ["① 1m", "② 2m", ...]
+
+    Returns:
+        Image data as bytes, or None if generation fails
+    """
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=api_key)
+
+        changes_text = "\n".join(f"- {change}" for change in number_changes)
+
+        choices_text = ""
+        if choices and len(choices) > 0:
+            choices_list = "\n".join(f"- {c}" for c in choices)
+            choices_text = f"""
+
+선택지도 다음으로 교체하세요:
+{choices_list}"""
+
+        prompt = f"""이 수학 문제 이미지를 거의 동일하게 다시 그리되, 아래 숫자만 변경하세요.
+
+변경할 숫자:
+{changes_text}
+{choices_text}
+
+★★★ 중요 규칙 ★★★
+- 그래프, 도형, 그림의 형태와 구조는 원본과 완전히 동일하게 유지하세요
+- 점의 위치, 선의 연결, 도형의 모양은 절대 바꾸지 마세요
+- 변수명, 점 이름(A, B, C, D, O 등)은 원본 그대로 유지하세요
+- 문제 텍스트의 구조도 원본과 동일하게 유지하고 숫자만 변경하세요
+- 흰색 배경 (#FFFFFF)
+- 검은색 텍스트와 선
+- 원본과 동일한 레이아웃과 스타일"""
+
+        # Send original image with the editing prompt
+        response = client.models.generate_content(
+            model="gemini-3-pro-image-preview",
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=original_image_data, mime_type="image/png")
+            ],
+            config=types.GenerateContentConfig(
+                response_modalities=['Image']
+            )
+        )
+
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                image_data = part.inline_data.data
+                print(f"Generated twin image from original: {len(image_data)} bytes")
+                return ensure_white_background(image_data)
+
+        print("No image in Gemini response for twin image editing")
+        return None
+
+    except Exception as e:
+        print(f"Twin image editing failed: {e}")
+        return None
+
+
+def verify_image_text_consistency(api_key, image_data, question_text, choices=None, max_retries=2):
+    """
+    Verify that numbers/equations in the generated image exactly match the question text.
+    If mismatch found, regenerate the image with corrected instructions.
+
+    Args:
+        api_key: Gemini API key
+        image_data: Generated image data as bytes
+        question_text: The question text that the image should match
+        choices: List of choices that should appear in the image
+        max_retries: Max number of regeneration attempts
+
+    Returns:
+        Verified (or regenerated) image data as bytes
+    """
+    for attempt in range(max_retries):
+        try:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-3-pro-preview')
+
+            choices_text = ""
+            if choices:
+                choices_text = f"\n\n선택지:\n{chr(10).join(choices)}"
+
+            verify_prompt = f"""이 수학 문제 이미지를 분석하고, 아래 문제 텍스트와 숫자가 정확히 일치하는지 확인하세요.
+
+문제 텍스트:
+{question_text}
+{choices_text}
+
+★★★ 확인사항 ★★★
+1. 이미지 안의 모든 수식, 숫자, 계수가 문제 텍스트와 정확히 같은지 확인
+2. 그래프에 표시된 방정식의 계수가 문제 텍스트의 계수와 같은지 확인
+3. 선택지가 문제 텍스트의 선택지와 같은지 확인
+
+JSON으로만 응답하세요:
+불일치가 없으면: {{"is_consistent": true}}
+불일치가 있으면: {{"is_consistent": false, "mismatches": ["문제: y=-1/5x²+3, 이미지: y=-1/6x²+3"]}}"""
+
+            image_part = {
+                "mime_type": "image/png",
+                "data": base64.b64encode(image_data).decode('utf-8')
+            }
+
+            response = model.generate_content([verify_prompt, image_part])
+            response_text = extract_json_from_response(response.text)
+            verify_result = json.loads(response_text)
+
+            if verify_result.get('is_consistent', False):
+                print(f"Image-text consistency PASSED (attempt {attempt + 1})")
+                return image_data
+            else:
+                mismatches = verify_result.get('mismatches', [])
+                print(f"Image-text consistency FAILED (attempt {attempt + 1}): {mismatches}")
+
+                # Regenerate the image with explicit correction instructions
+                try:
+                    from google import genai as genai_client
+                    from google.genai import types
+
+                    client = genai_client.Client(api_key=api_key)
+
+                    mismatch_text = "\n".join(f"- {m}" for m in mismatches)
+                    choices_instruction = ""
+                    if choices:
+                        choices_list = "\n".join(choices)
+                        choices_instruction = f"""
+
+선택지는 다음과 정확히 일치해야 합니다:
+{choices_list}"""
+
+                    fix_prompt = f"""이 수학 문제 이미지를 다시 그리세요. 다음 불일치를 수정해야 합니다:
+
+{mismatch_text}
+
+정확한 문제 텍스트:
+{question_text}
+{choices_instruction}
+
+★ 이미지의 모든 수식, 숫자, 계수가 위 문제 텍스트와 정확히 일치해야 합니다 ★
+★ 그래프에 표시되는 방정식도 문제 텍스트와 완전히 같아야 합니다 ★
+- 원본 이미지의 레이아웃과 스타일을 유지하세요
+- 흰색 배경
+- 검은색 텍스트와 선"""
+
+                    regen_response = client.models.generate_content(
+                        model="gemini-3-pro-image-preview",
+                        contents=[
+                            fix_prompt,
+                            types.Part.from_bytes(data=image_data, mime_type="image/png")
+                        ],
+                        config=types.GenerateContentConfig(
+                            response_modalities=['Image']
+                        )
+                    )
+
+                    for part in regen_response.candidates[0].content.parts:
+                        if part.inline_data is not None:
+                            new_image_data = ensure_white_background(part.inline_data.data)
+                            print(f"Regenerated image for consistency fix (attempt {attempt + 1})")
+                            image_data = new_image_data
+                            break
+                    else:
+                        print(f"No image in regeneration response (attempt {attempt + 1})")
+
+                except Exception as regen_e:
+                    print(f"Image regeneration failed (attempt {attempt + 1}): {regen_e}")
+
+        except Exception as e:
+            print(f"Image verification attempt {attempt + 1} error: {e}")
+            break
+
+    return image_data
 
 
 
@@ -4119,19 +4312,21 @@ def generate_math_twin():
             answer_number = step4.get('answer_number', 1)
             print(f"  Choices: {choices}, answer_number={answer_number}")
 
-        # === Save question image ===
+        # === Step 3: Generate question image ===
         generated_image_uuid = None
         try:
-            if has_graph and new_diagram_data:
-                # Diagram was already generated in Step 1 - save it
-                generated_image_uuid = str(uuid.uuid4())
-                image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
-                with open(image_path, 'wb') as f:
-                    f.write(new_diagram_data)
-                print(f"Saved diagram image: {generated_image_uuid}")
+            if has_graph and number_changes:
+                # Graph/diagram exists: edit original image, change numbers + choices
+                print(f"Step 3: Editing original image (changing numbers: {number_changes})...")
+                generated_image_data = generate_twin_image_from_original(
+                    api_key=api_key,
+                    original_image_data=image_data,
+                    number_changes=number_changes,
+                    choices=choices if is_mcq else None
+                )
             else:
-                # No graph: generate text-only question image
-                print("Generating text-only question image...")
+                # No graph: generate new text-only image
+                print(f"Step 3: Generating question image (is_mcq={is_mcq})...")
                 generated_image_data = generate_question_image(
                     api_key=api_key,
                     latex_string=latex_string,
@@ -4139,14 +4334,25 @@ def generate_math_twin():
                     graph_description=None,
                     has_graph=False
                 )
-                if generated_image_data:
-                    generated_image_uuid = str(uuid.uuid4())
-                    image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
-                    with open(image_path, 'wb') as f:
-                        f.write(generated_image_data)
-                    print(f"Saved question image: {generated_image_uuid}")
+
+            if generated_image_data:
+                # Verify image-text consistency before saving
+                print("Verifying image-text consistency...")
+                generated_image_data = verify_image_text_consistency(
+                    api_key=api_key,
+                    image_data=generated_image_data,
+                    question_text=latex_string,
+                    choices=choices if is_mcq else None
+                )
+                generated_image_uuid = str(uuid.uuid4())
+                image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
+                with open(image_path, 'wb') as f:
+                    f.write(generated_image_data)
+                print(f"Saved generated question image: {generated_image_uuid}")
+            else:
+                print("Question image generation returned no data")
         except Exception as e:
-            print(f"Warning: Question image save failed: {e}")
+            print(f"Warning: Question image generation failed: {e}")
 
         # === Generate solution image ===
         solution_image_uuid = None
@@ -4176,6 +4382,7 @@ def generate_math_twin():
             'is_mcq': is_mcq,
             'choices': choices,
             'has_graph': has_graph,
+            'number_changes': number_changes if has_graph else None,
             'modified_image_id': generated_image_uuid,
             'modified_image_url': f"/math_twin/images/{generated_image_uuid}" if generated_image_uuid else None,
             'solution_image_id': solution_image_uuid,
@@ -4211,9 +4418,8 @@ def download_image_from_url(url):
 
 def generate_single_twin(api_key, image_data, original_url, base_url, variation_index=0, num_total=1):
     """
-    Generate a single twin question using diagram-first approach.
-    If diagram exists: edit diagram first → read question from diagram → solve → choices
-    If no diagram: generate new question text → solve → choices
+    Generate a single twin question from image data using 4-step sequential approach.
+    variation_index and num_total are used to ensure each twin uses different numbers.
     Returns formatted response dict or None if failed.
     """
     try:
@@ -4288,30 +4494,29 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
         answer = step3.get('answer', '')
         print(f"  {tag} Answer: {answer}")
 
-        # === Step 4: MCQ choices ===
+        # === Step 4: Generate MCQ choices (if applicable) ===
         choices = []
         answer_number = 1
         if is_mcq:
-            print(f"  {tag} Step 4: Generating choices...")
+            print(f"  [Twin {variation_index+1}] Step 4: Generating choices...")
             step4 = twin_step4_choices(api_key=api_key, question_text=latex_string, answer=answer)
             choices = step4.get('choices', [])
             answer_number = step4.get('answer_number', 1)
-            print(f"  {tag} Choices: {choices}")
+            print(f"  [Twin {variation_index+1}] Choices: {choices}")
 
-        # === Save question image ===
+        # === Step 3: Generate question image ===
         generated_image_url = None
         try:
-            if has_graph and new_diagram_data:
-                # Diagram already generated in Step 1
-                generated_image_uuid = str(uuid.uuid4())
-                image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
-                with open(image_path, 'wb') as f:
-                    f.write(new_diagram_data)
-                generated_image_url = f"{base_url}/math_twin/images/{generated_image_uuid}"
-                print(f"  {tag} Saved diagram: {generated_image_uuid}")
+            if has_graph and number_changes:
+                print(f"  [Twin {variation_index+1}] Step 3: Editing original image...")
+                generated_image_data = generate_twin_image_from_original(
+                    api_key=api_key,
+                    original_image_data=image_data,
+                    number_changes=number_changes,
+                    choices=choices if is_mcq else None
+                )
             else:
-                # No graph: generate text-only image
-                print(f"  {tag} Generating text-only question image...")
+                print(f"  [Twin {variation_index+1}] Step 3: Generating question image...")
                 generated_image_data = generate_question_image(
                     api_key=api_key,
                     latex_string=latex_string,
@@ -4319,21 +4524,31 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                     graph_description=None,
                     has_graph=False
                 )
-                if generated_image_data:
-                    generated_image_uuid = str(uuid.uuid4())
-                    image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
-                    with open(image_path, 'wb') as f:
-                        f.write(generated_image_data)
-                    generated_image_url = f"{base_url}/math_twin/images/{generated_image_uuid}"
-                    print(f"  {tag} Saved question image: {generated_image_uuid}")
+
+            if generated_image_data:
+                print(f"  [Twin {variation_index+1}] Verifying image-text consistency...")
+                generated_image_data = verify_image_text_consistency(
+                    api_key=api_key,
+                    image_data=generated_image_data,
+                    question_text=latex_string,
+                    choices=choices if is_mcq else None
+                )
+                generated_image_uuid = str(uuid.uuid4())
+                image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{generated_image_uuid}.png")
+                with open(image_path, 'wb') as f:
+                    f.write(generated_image_data)
+                generated_image_url = f"{base_url}/math_twin/images/{generated_image_uuid}"
+                print(f"  [Twin {variation_index+1}] Saved question image: {generated_image_uuid}")
+            else:
+                print(f"  [Twin {variation_index+1}] Question image generation returned no data")
         except Exception as e:
-            print(f"  {tag} Warning: Question image save failed: {e}")
+            print(f"  [Twin {variation_index+1}] Warning: Question image generation failed: {e}")
 
         # === Generate solution image ===
         solution_image_url = None
         try:
             if solution_text:
-                print(f"  {tag} Generating solution image...")
+                print(f"  [Twin {variation_index+1}] Generating solution image...")
                 solution_image_data = generate_solution_image(
                     api_key=api_key,
                     solution_text=solution_text
@@ -4344,11 +4559,11 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                     with open(solution_image_path, 'wb') as f:
                         f.write(solution_image_data)
                     solution_image_url = f"{base_url}/math_twin/images/{solution_image_uuid}"
-                    print(f"  {tag} Saved solution image: {solution_image_uuid}")
+                    print(f"  [Twin {variation_index+1}] Saved solution image: {solution_image_uuid}")
                 else:
-                    print(f"  {tag} Solution image returned no data")
+                    print(f"  [Twin {variation_index+1}] Solution image generation returned no data")
         except Exception as e:
-            print(f"  {tag} Warning: Solution image failed: {e}")
+            print(f"  [Twin {variation_index+1}] Warning: Solution image generation failed: {e}")
 
         return {
             "latexString": latex_string,
