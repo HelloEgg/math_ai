@@ -3468,15 +3468,17 @@ def generate_solution_image(api_key, solution_text):
         return None
 
 
-def generate_twin_image_from_original(api_key, original_image_data, number_changes):
+def generate_twin_image_from_original(api_key, original_image_data, number_changes, choices=None):
     """
     Generate a twin question image by editing numbers on the original image.
     Keeps the graph/diagram structure identical, only replaces specified numbers.
+    Also updates choices in the image if provided.
 
     Args:
         api_key: Gemini API key
         original_image_data: Original image data as bytes
         number_changes: List of number change descriptions, e.g. ["40° → 30°", "60° → 70°"]
+        choices: List of new choices to display, e.g. ["① 1m", "② 2m", ...]
 
     Returns:
         Image data as bytes, or None if generation fails
@@ -3489,17 +3491,25 @@ def generate_twin_image_from_original(api_key, original_image_data, number_chang
 
         changes_text = "\n".join(f"- {change}" for change in number_changes)
 
+        choices_text = ""
+        if choices and len(choices) > 0:
+            choices_list = "\n".join(f"- {c}" for c in choices)
+            choices_text = f"""
+
+선택지도 다음으로 교체하세요:
+{choices_list}"""
+
         prompt = f"""이 수학 문제 이미지를 거의 동일하게 다시 그리되, 아래 숫자만 변경하세요.
 
 변경할 숫자:
 {changes_text}
+{choices_text}
 
 ★★★ 중요 규칙 ★★★
 - 그래프, 도형, 그림의 형태와 구조는 원본과 완전히 동일하게 유지하세요
 - 점의 위치, 선의 연결, 도형의 모양은 절대 바꾸지 마세요
 - 변수명, 점 이름(A, B, C, D, O 등)은 원본 그대로 유지하세요
 - 문제 텍스트의 구조도 원본과 동일하게 유지하고 숫자만 변경하세요
-- 선택지가 있으면 선택지도 새 숫자에 맞게 변경하세요
 - 흰색 배경 (#FFFFFF)
 - 검은색 텍스트와 선
 - 원본과 동일한 레이아웃과 스타일"""
@@ -3532,12 +3542,8 @@ def generate_twin_image_from_original(api_key, original_image_data, number_chang
 
 def verify_and_fix_twin(api_key, twin_result, max_retries=2):
     """
-    Verify that a generated twin problem is mathematically valid:
-    - For MCQ: the correct answer must exactly match one of the choices
-    - The solution must be solvable and correct
-
-    If invalid, asks Gemini to regenerate with answer-first approach.
-    Returns the fixed result dict, or the original if verification passes or fix fails.
+    Verify that a generated twin problem's answer exactly matches one of the choices.
+    If not, ask Gemini to redesign the problem using answer-first approach.
     """
     is_mcq = twin_result.get('is_mcq', False)
     if not is_mcq:
@@ -3549,16 +3555,13 @@ def verify_and_fix_twin(api_key, twin_result, max_retries=2):
 
     for attempt in range(max_retries):
         question = twin_result.get('question', '')
-        solution = twin_result.get('solution', '')
         current_choices = twin_result.get('choices', [])
-        answer = twin_result.get('answer', '')
-        answer_number = twin_result.get('answer_number', '')
 
         try:
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel('gemini-2.0-flash')
 
-            verify_prompt = f"""다음 수학 문제를 검증하세요. 제시된 풀이를 무시하고, 문제를 처음부터 직접 풀어보세요.
+            verify_prompt = f"""다음 수학 문제를 직접 풀고, 정답이 선택지에 정확히 있는지 확인하세요.
 
 문제:
 {question}
@@ -3566,25 +3569,21 @@ def verify_and_fix_twin(api_key, twin_result, max_retries=2):
 선택지:
 {chr(10).join(current_choices)}
 
-★★★ 검증 작업 ★★★
-1. 위 문제를 처음부터 직접 풀어보세요 (제시된 풀이를 참고하지 마세요)
-2. 직접 계산한 정답이 선택지 중 하나와 정확히 일치하는지 확인하세요
-3. 근사값이 아니라 정확한 값이어야 합니다
+★ 제시된 풀이를 무시하고, 처음부터 직접 풀어보세요.
+★ 정답이 선택지 중 하나와 정확히(exact) 일치해야 합니다. 근사값은 안 됩니다.
 
-결과를 다음 JSON 형식으로만 응답하세요 (마크다운 없이, 순수 JSON만):
+JSON으로만 응답하세요:
 
-정답이 선택지에 정확히 있는 경우:
-{{"is_valid": true, "my_answer": "내가 직접 계산한 정답", "my_solution": "내 풀이 과정", "matching_choice_number": 2}}
+정답이 선택지에 정확히 있으면:
+{{"is_valid": true, "my_answer": "계산한 정답", "my_solution": "풀이 과정", "matching_choice_number": 2}}
 
-정답이 선택지에 없는 경우 - 반드시 정답 우선 설계로 문제를 다시 만드세요:
-{{"is_valid": false, "my_answer": "내가 직접 계산한 정답", "reason": "왜 선택지에 없는지", "fixed_question": "수정된 문제 (정답이 깔끔한 값이 되도록 숫자를 역산하여 재설계)", "fixed_solution": "수정된 풀이 (검산 포함)", "fixed_answer": "수정된 정답 (선택지 중 하나와 정확히 일치)", "fixed_choices": ["① 값1", "② 값2", "③ 값3", "④ 값4", "⑤ 값5"], "fixed_answer_number": 2, "fixed_number_changes": ["원본숫자 → 수정숫자"]}}
+정답이 선택지에 없으면 - 정답을 먼저 정하고 숫자를 역산하여 문제를 다시 설계하세요:
+{{"is_valid": false, "my_answer": "계산한 정답", "reason": "설명", "fixed_question": "수정 문제", "fixed_solution": "수정 풀이 (검산 포함)", "fixed_answer": "수정 정답 (선택지와 정확히 일치)", "fixed_choices": ["① 값1", "② 값2", "③ 값3", "④ 값4", "⑤ 값5"], "fixed_answer_number": 2, "fixed_number_changes": ["숫자변경"]}}
 
-★ 수정할 때 핵심 규칙:
-- 먼저 정답이 될 깔끔한 값(정수, 간단한 분수)을 정하세요
-- 그 정답이 나오도록 문제의 숫자를 역산하세요
-- 문제 구조는 절대 바꾸지 마세요 (숫자만 변경)
-- 검산: 수정된 문제를 다시 풀어서 정답이 선택지와 일치하는지 확인하세요
-- 유효한 JSON만 응답하세요"""
+수정 규칙:
+- 깔끔한 정답(정수, 간단한 분수)을 먼저 정하고, 그에 맞게 숫자를 역산
+- 문제 구조는 유지, 숫자만 변경
+- 검산 필수"""
 
             response = model.generate_content(verify_prompt)
             response_text = extract_json_from_response(response.text)
@@ -3594,8 +3593,7 @@ def verify_and_fix_twin(api_key, twin_result, max_retries=2):
                 matching = verify_result.get('matching_choice_number')
                 my_answer = verify_result.get('my_answer', '')
                 my_solution = verify_result.get('my_solution', '')
-                print(f"Twin verification passed (attempt {attempt + 1}): answer={my_answer}")
-                # Update with verified answer/solution
+                print(f"Twin verification PASSED (attempt {attempt + 1}): answer={my_answer}, choice={matching}")
                 if matching:
                     twin_result['answer_number'] = matching
                 if my_answer:
@@ -3604,29 +3602,20 @@ def verify_and_fix_twin(api_key, twin_result, max_retries=2):
                     twin_result['solution'] = my_solution
                 return twin_result
             else:
-                reason = verify_result.get('reason', 'unknown')
-                print(f"Twin verification failed (attempt {attempt + 1}): {reason}")
-                print(f"  Computed answer: {verify_result.get('my_answer', '?')}")
+                print(f"Twin verification FAILED (attempt {attempt + 1}): {verify_result.get('reason', '?')}")
+                print(f"  Computed: {verify_result.get('my_answer', '?')}")
 
-                # Apply fixes from regeneration
-                if verify_result.get('fixed_question'):
-                    twin_result['question'] = verify_result['fixed_question']
-                if verify_result.get('fixed_solution'):
-                    twin_result['solution'] = verify_result['fixed_solution']
-                if verify_result.get('fixed_answer'):
-                    twin_result['answer'] = verify_result['fixed_answer']
-                if verify_result.get('fixed_choices'):
-                    twin_result['choices'] = verify_result['fixed_choices']
-                if verify_result.get('fixed_answer_number'):
-                    twin_result['answer_number'] = verify_result['fixed_answer_number']
-                if verify_result.get('fixed_number_changes'):
-                    twin_result['number_changes'] = verify_result['fixed_number_changes']
+                # Apply fix
+                for key_map in [('fixed_question', 'question'), ('fixed_solution', 'solution'),
+                                ('fixed_answer', 'answer'), ('fixed_choices', 'choices'),
+                                ('fixed_answer_number', 'answer_number'), ('fixed_number_changes', 'number_changes')]:
+                    if verify_result.get(key_map[0]):
+                        twin_result[key_map[1]] = verify_result[key_map[0]]
 
-                print(f"Applied fix from verification (attempt {attempt + 1})")
-                # Continue loop to re-verify the fix
+                print(f"  Applied fix, will re-verify...")
 
         except Exception as e:
-            print(f"Verification attempt {attempt + 1} failed: {e}")
+            print(f"Verification attempt {attempt + 1} error: {e}")
             break
 
     return twin_result
@@ -3854,82 +3843,49 @@ def generate_math_twin():
         # Create the prompt - Korean version with choices support
         prompt = """이 수학 문제 이미지를 분석하고 "쌍둥이" 문제를 생성하세요.
 
-★★★ 가장 중요한 규칙 ★★★
-쌍둥이 문제는 원본 문제에서 "숫자(상수)"만 바꾼 문제입니다.
+★★★ 절대 규칙: 정답이 선택지에 정확히 있어야 합니다 ★★★
+
+작업 순서 (반드시 이 순서대로):
+1단계: 원본 문제를 완전히 분석하고, 풀이 구조를 이해하세요
+2단계: 정답으로 사용할 깔끔한 값을 먼저 선택하세요 (정수, 간단한 분수 등)
+3단계: 선택한 정답이 나오도록 문제의 숫자를 역으로 계산하여 결정하세요
+  - 예: 정답을 2m로 정했다면, x=2를 방정식에 대입하여 나머지 숫자(넓이 등)를 결정
+  - 예: 정답을 50°로 정했다면, 각도 관계식에서 나머지 각도를 역산
+4단계: 결정된 숫자로 문제를 처음부터 풀어서 정답이 정확히 맞는지 검산하세요
+5단계: 정답을 포함한 5개의 선택지를 만드세요
+
+★ 절대 금지: 숫자를 먼저 바꾸고 풀어보는 방식 (정답이 무리수가 될 수 있음) ★
+★ 정답은 정수, 간단한 분수(1/2, 3/4 등) 같은 깔끔한 값이어야 합니다 ★
+★ answer의 값은 choices 중 하나와 정확히 같아야 합니다 ★
+
+숫자 변경 규칙:
 - 수식의 구조, 형태, 변수명은 절대 변경하지 마세요
-- 변수명(x, y, z, a, b 등)은 원본 그대로 유지하세요
-- 함수의 종류(sin, cos, log 등)는 원본 그대로 유지하세요
+- 오직 숫자(계수, 상수, 좌표값, 각도, 넓이 등)만 변경하세요
 - 문장 구조와 질문 형태는 원본 그대로 유지하세요
-- 오직 숫자(계수, 상수, 좌표값, 각도 등)만 다른 값으로 바꾸세요
-
-★★★ 정답 우선 설계 (매우 중요) ★★★
-객관식 문제인 경우 반드시 다음 순서로 작업하세요:
-1단계: 원본 문제의 풀이 과정과 구조를 완전히 이해하세요
-2단계: 먼저 정답이 될 깔끔한 값을 정하세요 (정수, 간단한 분수 등)
-3단계: 그 정답이 나오도록 문제의 숫자를 역산하여 결정하세요
-4단계: 실제로 풀어서 정답이 맞는지 반드시 검산하세요
-5단계: 정답을 선택지 중 하나에 포함시키세요
-
-★ 정답이 √, 무리수, 복잡한 분수가 되면 안 됩니다 ★
-★ 정답은 반드시 선택지 중 하나와 정확히 일치해야 합니다 ★
 
 그래프/도형이 있는 경우:
-- 그래프/도형의 구조는 원본과 완전히 동일하게 유지
-- 이미지 안에 표시된 숫자(각도, 길이, 좌표 등)만 변경
-- number_changes에 "원본숫자 → 새숫자" 형식으로 모든 변경사항을 기록하세요
-
-중요: 먼저 이미지에 그래프, 도형, 그림이 포함되어 있는지 확인하세요.
-또한 번호가 매겨진 보기가 있는 객관식 문제(MCQ)인지 확인하세요.
+- 도형의 구조는 원본과 완전히 동일하게 유지
+- number_changes에 변경할 숫자를 기록 (문제 텍스트 + 이미지 안의 숫자 모두)
 
 다음 JSON 형식으로만 응답하세요 (마크다운 없이, 코드 블록 없이, 순수 JSON만):
-
-그래프/도형이 있는 경우:
 {
-    "question": "쌍둥이 수학 문제 (LaTeX 형식, 한국어로 작성)",
-    "answer": "최종 답 (LaTeX 형식) - 반드시 choices 중 하나와 정확히 일치",
+    "question": "쌍둥이 수학 문제 전체 텍스트 (LaTeX, 한국어)",
+    "answer": "정답 값 (choices 중 하나와 정확히 동일)",
     "answer_number": 2,
-    "solution": "단계별 풀이 (LaTeX 형식, 한국어로 작성) - 검산 과정 포함",
+    "solution": "단계별 풀이 + 검산 (LaTeX, 한국어)",
     "is_mcq": true,
-    "choices": ["① 선택지1", "② 선택지2", "③ 선택지3(정답)", "④ 선택지4", "⑤ 선택지5"],
+    "choices": ["① 값1", "② 값2", "③ 값3", "④ 값4", "⑤ 값5"],
     "has_graph": true,
-    "number_changes": ["40° → 30°", "60° → 70°"]
-}
-
-그래프가 없는 텍스트 전용 문제:
-{
-    "question": "쌍둥이 수학 문제 (LaTeX 형식, 한국어로 작성)",
-    "answer": "최종 답 (LaTeX 형식)",
-    "answer_number": 2,
-    "solution": "단계별 풀이 (LaTeX 형식, 한국어로 작성)",
-    "is_mcq": true,
-    "choices": ["① 선택지1", "② 선택지2", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"],
-    "has_graph": false,
-    "number_changes": []
-}
-
-객관식이 아닌 경우:
-{
-    "question": "쌍둥이 수학 문제 (LaTeX 형식, 한국어로 작성)",
-    "answer": "최종 답 (LaTeX 형식)",
-    "answer_number": 0,
-    "solution": "단계별 풀이 (LaTeX 형식, 한국어로 작성)",
-    "is_mcq": false,
-    "choices": [],
-    "has_graph": false,
-    "number_changes": []
+    "number_changes": ["18m → 20m", "14m → 12m", "216m² → 128m²"]
 }
 
 중요 지침:
-- 모든 내용(문제, 풀이, 선택지)은 반드시 한국어로 작성하세요
-- ★ 수식 구조/변수명/함수 종류는 절대 바꾸지 말고, 숫자(상수/계수/각도)만 변경하세요 ★
-- ★ 객관식: 정답을 먼저 정하고, 그에 맞게 숫자를 역산하세요. 정답이 선택지에 반드시 있어야 합니다 ★
-- answer_number는 정답인 선택지의 번호 (1~5)
-- answer는 정답 값 자체 (선택지의 값과 정확히 일치해야 함)
-- is_mcq는 선택할 수 있는 번호가 매겨진 보기가 있으면 true
-- choices는 객관식인 경우 모든 보기를 배열로 제공 (①②③④⑤ 기호 포함)
-- number_changes는 이미지 안의 숫자를 어떻게 바꿀지 "원본 → 변경" 형식의 배열 (그래프/도형이 있을 때만)
-- solution에 검산 과정을 포함하세요 (정답이 선택지와 일치하는지 확인)
-- 유효한 JSON만 응답하세요, 추가 텍스트 없이"""
+- ★ answer 값은 반드시 choices의 ①~⑤ 중 하나와 정확히 일치해야 합니다 ★
+- answer_number는 정답 선택지 번호 (1~5)
+- number_changes는 이미지 안 숫자의 변경사항 (그래프/도형 있을 때만)
+- has_graph가 false이면 number_changes는 빈 배열
+- solution에 검산 과정을 반드시 포함하세요
+- 유효한 JSON만 응답하세요"""
 
         # Prepare the image for Gemini
         image_part = {
@@ -3967,12 +3923,13 @@ def generate_math_twin():
         generated_image_uuid = None
         try:
             if has_graph and number_changes:
-                # Graph/diagram exists: edit original image, only change numbers
-                print(f"Editing original image (changing numbers: {number_changes})...")
+                # Graph/diagram exists: edit original image, change numbers + choices
+                print(f"Editing original image (changing numbers: {number_changes}, choices: {len(choices)})...")
                 generated_image_data = generate_twin_image_from_original(
                     api_key=app.config['GEMINI_API_KEY'],
                     original_image_data=image_data,
-                    number_changes=number_changes
+                    number_changes=number_changes,
+                    choices=choices if is_mcq else None
                 )
             else:
                 # No graph: generate new text-only image
@@ -4095,83 +4052,50 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
 
         prompt = f"""이 수학 문제 이미지를 분석하고 "쌍둥이" 문제를 생성하세요.
 
-★★★ 가장 중요한 규칙 ★★★
-쌍둥이 문제는 원본 문제에서 "숫자(상수)"만 바꾼 문제입니다.
-- 수식의 구조, 형태, 변수명은 절대 변경하지 마세요
-- 변수명(x, y, z, a, b 등)은 원본 그대로 유지하세요
-- 함수의 종류(sin, cos, log 등)는 원본 그대로 유지하세요
-- 문장 구조와 질문 형태는 원본 그대로 유지하세요
-- 오직 숫자(계수, 상수, 좌표값, 각도 등)만 다른 값으로 바꾸세요
+★★★ 절대 규칙: 정답이 선택지에 정확히 있어야 합니다 ★★★
 
-★★★ 정답 우선 설계 (매우 중요) ★★★
-객관식 문제인 경우 반드시 다음 순서로 작업하세요:
-1단계: 원본 문제의 풀이 과정과 구조를 완전히 이해하세요
-2단계: 먼저 정답이 될 깔끔한 값을 정하세요 (정수, 간단한 분수 등)
-3단계: 그 정답이 나오도록 문제의 숫자를 역산하여 결정하세요
-4단계: 실제로 풀어서 정답이 맞는지 반드시 검산하세요
-5단계: 정답을 선택지 중 하나에 포함시키세요
+작업 순서 (반드시 이 순서대로):
+1단계: 원본 문제를 완전히 분석하고, 풀이 구조를 이해하세요
+2단계: 정답으로 사용할 깔끔한 값을 먼저 선택하세요 (정수, 간단한 분수 등)
+3단계: 선택한 정답이 나오도록 문제의 숫자를 역으로 계산하여 결정하세요
+  - 예: 정답을 2m로 정했다면, x=2를 방정식에 대입하여 나머지 숫자(넓이 등)를 결정
+  - 예: 정답을 50°로 정했다면, 각도 관계식에서 나머지 각도를 역산
+4단계: 결정된 숫자로 문제를 처음부터 풀어서 정답이 정확히 맞는지 검산하세요
+5단계: 정답을 포함한 5개의 선택지를 만드세요
 
-★ 정답이 √, 무리수, 복잡한 분수가 되면 안 됩니다 ★
-★ 정답은 반드시 선택지 중 하나와 정확히 일치해야 합니다 ★
+★ 절대 금지: 숫자를 먼저 바꾸고 풀어보는 방식 (정답이 무리수가 될 수 있음) ★
+★ 정답은 정수, 간단한 분수(1/2, 3/4 등) 같은 깔끔한 값이어야 합니다 ★
+★ answer의 값은 choices 중 하나와 정확히 같아야 합니다 ★
 {variation_hint}
 
-그래프/도형이 있는 경우:
-- 그래프/도형의 구조는 원본과 완전히 동일하게 유지
-- 이미지 안에 표시된 숫자(각도, 길이, 좌표 등)만 변경
-- number_changes에 "원본숫자 → 새숫자" 형식으로 모든 변경사항을 기록하세요
+숫자 변경 규칙:
+- 수식의 구조, 형태, 변수명은 절대 변경하지 마세요
+- 오직 숫자(계수, 상수, 좌표값, 각도, 넓이 등)만 변경하세요
+- 문장 구조와 질문 형태는 원본 그대로 유지하세요
 
-중요: 먼저 이미지에 그래프, 도형, 그림이 포함되어 있는지 확인하세요.
-또한 번호가 매겨진 보기가 있는 객관식 문제(MCQ)인지 확인하세요.
+그래프/도형이 있는 경우:
+- 도형의 구조는 원본과 완전히 동일하게 유지
+- number_changes에 변경할 숫자를 기록 (문제 텍스트 + 이미지 안의 숫자 모두)
 
 다음 JSON 형식으로만 응답하세요 (마크다운 없이, 코드 블록 없이, 순수 JSON만):
-
-그래프/도형이 있는 경우:
 {{
-    "question": "쌍둥이 수학 문제 (LaTeX 형식, 전체 문제 텍스트, 한국어로 작성)",
-    "answer": "최종 답 (선택지 값과 정확히 일치)",
+    "question": "쌍둥이 수학 문제 전체 텍스트 (LaTeX, 한국어)",
+    "answer": "정답 값 (choices 중 하나와 정확히 동일)",
     "answer_number": 2,
-    "solution": "단계별 풀이/설명 (LaTeX 형식, 한국어로 작성) - 검산 포함",
+    "solution": "단계별 풀이 + 검산 (LaTeX, 한국어)",
     "is_mcq": true,
-    "choices": ["① 선택지1", "② 선택지2(정답)", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"],
+    "choices": ["① 값1", "② 값2", "③ 값3", "④ 값4", "⑤ 값5"],
     "has_graph": true,
-    "number_changes": ["40° → 30°", "60° → 70°"]
-}}
-
-그래프가 없는 텍스트 전용 문제:
-{{
-    "question": "쌍둥이 수학 문제 (LaTeX 형식, 한국어로 작성)",
-    "answer": "최종 답",
-    "answer_number": 2,
-    "solution": "단계별 풀이 (LaTeX 형식, 한국어로 작성)",
-    "is_mcq": true,
-    "choices": ["① 선택지1", "② 선택지2", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"],
-    "has_graph": false,
-    "number_changes": []
-}}
-
-객관식이 아닌 경우:
-{{
-    "question": "쌍둥이 수학 문제 (LaTeX 형식, 한국어로 작성)",
-    "answer": "최종 답",
-    "answer_number": 0,
-    "solution": "단계별 풀이 (LaTeX 형식, 한국어로 작성)",
-    "is_mcq": false,
-    "choices": [],
-    "has_graph": false,
-    "number_changes": []
+    "number_changes": ["18m → 20m", "14m → 12m", "216m² → 128m²"]
 }}
 
 중요 지침:
-- 모든 내용(문제, 풀이, 선택지)은 반드시 한국어로 작성하세요
-- ★ 수식 구조/변수명/함수 종류는 절대 바꾸지 말고, 숫자(상수/계수/각도)만 변경하세요 ★
-- ★ 객관식: 정답을 먼저 정하고, 그에 맞게 숫자를 역산하세요. 정답이 선택지에 반드시 있어야 합니다 ★
-- answer_number는 정답인 선택지의 번호 (1~5)
-- answer는 정답 값 자체 (선택지의 값과 정확히 일치해야 함)
-- is_mcq는 선택할 수 있는 번호가 매겨진 보기가 있으면 true
-- choices는 객관식인 경우 모든 보기를 배열로 제공 (①②③④⑤ 기호 포함)
-- number_changes는 이미지 안의 숫자를 어떻게 바꿀지 "원본 → 변경" 형식의 배열 (그래프/도형이 있을 때만)
-- solution에 검산 과정을 포함하세요 (정답이 선택지와 일치하는지 확인)
-- 유효한 JSON만 응답하세요, 추가 텍스트 없이"""
+- ★ answer 값은 반드시 choices의 ①~⑤ 중 하나와 정확히 일치해야 합니다 ★
+- answer_number는 정답 선택지 번호 (1~5)
+- number_changes는 이미지 안 숫자의 변경사항 (그래프/도형 있을 때만)
+- has_graph가 false이면 number_changes는 빈 배열
+- solution에 검산 과정을 반드시 포함하세요
+- 유효한 JSON만 응답하세요"""
 
         image_part = {
             "mime_type": mime_type,
@@ -4196,12 +4120,13 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
         generated_image_url = None
         try:
             if has_graph and number_changes:
-                # Graph/diagram exists: edit original image, only change numbers
-                print(f"Editing original image (changing numbers: {number_changes})...")
+                # Graph/diagram exists: edit original image, change numbers + choices
+                print(f"Editing original image (changing numbers: {number_changes}, choices: {len(choices)})...")
                 generated_image_data = generate_twin_image_from_original(
                     api_key=api_key,
                     original_image_data=image_data,
-                    number_changes=number_changes
+                    number_changes=number_changes,
+                    choices=choices if is_mcq else None
                 )
             else:
                 # No graph: generate new text-only image
