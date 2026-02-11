@@ -3555,35 +3555,44 @@ def verify_and_fix_twin(api_key, twin_result, max_retries=2):
 
     for attempt in range(max_retries):
         question = twin_result.get('question', '')
+        solution = twin_result.get('solution', '')
         current_choices = twin_result.get('choices', [])
 
         try:
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel('gemini-2.0-flash')
 
-            verify_prompt = f"""다음 수학 문제를 직접 풀고, 정답이 선택지에 정확히 있는지 확인하세요.
+            verify_prompt = f"""다음 수학 문제를 검증하세요. 두 가지를 확인합니다.
 
 문제:
 {question}
 
+풀이:
+{solution}
+
 선택지:
 {chr(10).join(current_choices)}
 
-★ 제시된 풀이를 무시하고, 처음부터 직접 풀어보세요.
-★ 정답이 선택지 중 하나와 정확히(exact) 일치해야 합니다. 근사값은 안 됩니다.
+★★★ 검증 1: 문제-풀이 일관성 ★★★
+- 풀이에서 사용한 숫자(계수, 상수항 등)가 문제의 숫자와 정확히 같은지 확인하세요
+- 예: 문제가 "x² - 4x + 2 = 0"인데 풀이가 "x² - 4x + 3 = 0"을 풀었다면 불일치!
+
+★★★ 검증 2: 정답-선택지 일치 ★★★
+- 문제를 직접 풀어서 정답이 선택지 중 하나와 정확히 일치하는지 확인하세요
+- 근사값이 아닌 정확한 값이어야 합니다
 
 JSON으로만 응답하세요:
 
-정답이 선택지에 정확히 있으면:
-{{"is_valid": true, "my_answer": "계산한 정답", "my_solution": "풀이 과정", "matching_choice_number": 2}}
+모두 통과:
+{{"is_valid": true, "my_answer": "계산한 정답", "my_solution": "문제와 일치하는 풀이", "matching_choice_number": 2}}
 
-정답이 선택지에 없으면 - 정답을 먼저 정하고 숫자를 역산하여 문제를 다시 설계하세요:
-{{"is_valid": false, "my_answer": "계산한 정답", "reason": "설명", "fixed_question": "수정 문제", "fixed_solution": "수정 풀이 (검산 포함)", "fixed_answer": "수정 정답 (선택지와 정확히 일치)", "fixed_choices": ["① 값1", "② 값2", "③ 값3", "④ 값4", "⑤ 값5"], "fixed_answer_number": 2, "fixed_number_changes": ["숫자변경"]}}
+불일치가 있으면 - 문제의 숫자를 기준으로 정답이 선택지에 있도록 재설계:
+{{"is_valid": false, "my_answer": "현재 계산 결과", "reason": "불일치 내용 설명", "fixed_question": "수정 문제", "fixed_solution": "수정 풀이 (문제와 숫자 완전 일치, 검산 포함)", "fixed_answer": "수정 정답 (선택지와 정확히 일치)", "fixed_choices": ["① 값1", "② 값2", "③ 값3", "④ 값4", "⑤ 값5"], "fixed_answer_number": 2, "fixed_number_changes": ["숫자변경"]}}
 
 수정 규칙:
 - 깔끔한 정답(정수, 간단한 분수)을 먼저 정하고, 그에 맞게 숫자를 역산
-- 문제 구조는 유지, 숫자만 변경
-- 검산 필수"""
+- fixed_solution은 fixed_question의 숫자를 정확히 사용해야 함
+- 문제 구조는 유지, 숫자만 변경"""
 
             response = model.generate_content(verify_prompt)
             response_text = extract_json_from_response(response.text)
@@ -3858,6 +3867,12 @@ def generate_math_twin():
 ★ 정답은 정수, 간단한 분수(1/2, 3/4 등) 같은 깔끔한 값이어야 합니다 ★
 ★ answer의 값은 choices 중 하나와 정확히 같아야 합니다 ★
 
+★★★ 문제-풀이 일관성 (필수) ★★★
+- solution(풀이)은 반드시 question(문제)에 있는 정확히 같은 숫자를 사용해야 합니다
+- 문제의 상수항이 2이면, 풀이에서도 반드시 상수항 2로 풀어야 합니다
+- 문제와 풀이의 숫자가 하나라도 다르면 절대 안 됩니다
+- question을 작성한 후, solution에서 question의 모든 숫자를 그대로 가져와서 풀이하세요
+
 숫자 변경 규칙:
 - 수식의 구조, 형태, 변수명은 절대 변경하지 마세요
 - 오직 숫자(계수, 상수, 좌표값, 각도, 넓이 등)만 변경하세요
@@ -4066,6 +4081,12 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
 ★ 절대 금지: 숫자를 먼저 바꾸고 풀어보는 방식 (정답이 무리수가 될 수 있음) ★
 ★ 정답은 정수, 간단한 분수(1/2, 3/4 등) 같은 깔끔한 값이어야 합니다 ★
 ★ answer의 값은 choices 중 하나와 정확히 같아야 합니다 ★
+
+★★★ 문제-풀이 일관성 (필수) ★★★
+- solution(풀이)은 반드시 question(문제)에 있는 정확히 같은 숫자를 사용해야 합니다
+- 문제의 상수항이 2이면, 풀이에서도 반드시 상수항 2로 풀어야 합니다
+- 문제와 풀이의 숫자가 하나라도 다르면 절대 안 됩니다
+- question을 작성한 후, solution에서 question의 모든 숫자를 그대로 가져와서 풀이하세요
 {variation_hint}
 
 숫자 변경 규칙:
