@@ -3380,6 +3380,94 @@ def extract_json_from_response(response_text):
     return response_text
 
 
+def ensure_white_background(image_data):
+    """
+    Post-process generated image to ensure pure white background.
+    Converts any near-white or light gray pixels to pure white.
+
+    Args:
+        image_data: Image data as bytes
+
+    Returns:
+        Processed image data as bytes (PNG format)
+    """
+    try:
+        img = Image.open(io.BytesIO(image_data)).convert('RGB')
+        pixels = img.load()
+        width, height = img.size
+
+        for y in range(height):
+            for x in range(width):
+                r, g, b = pixels[x, y]
+                # If pixel is light gray or near-white (all channels > 200), make it pure white
+                if r > 200 and g > 200 and b > 200:
+                    pixels[x, y] = (255, 255, 255)
+
+        output = io.BytesIO()
+        img.save(output, format='PNG')
+        return output.getvalue()
+    except Exception as e:
+        print(f"White background conversion failed: {e}")
+        return image_data
+
+
+def generate_solution_image(api_key, solution_text):
+    """
+    Generate a solution-only image (no question text) using Gemini's image generation model.
+
+    Args:
+        api_key: Gemini API key
+        solution_text: The solution/explanation text in LaTeX format
+
+    Returns:
+        Image data as bytes, or None if generation fails
+    """
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=api_key)
+
+        prompt = f"""수학 문제의 해설(풀이)만 포함하는 깔끔하고 전문적인 이미지를 생성하세요.
+
+중요: 문제 텍스트는 포함하지 마세요. 오직 풀이/해설만 표시하세요.
+
+해설 내용:
+{solution_text}
+
+스타일 요구사항:
+- 흰색 배경 (순수 흰색, #FFFFFF)
+- 검은색 텍스트
+- 명확하고 읽기 쉬운 글꼴
+- 깔끔하고 심플한 교과서 스타일
+- 수학적 정밀성
+- 추가 장식이나 색상 없음
+- 한국어 텍스트 사용
+- LaTeX 수식은 올바르게 렌더링
+- 단계별로 깔끔하게 정리"""
+
+        response = client.models.generate_content(
+            model="gemini-3-pro-image-preview",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_modalities=['Image']
+            )
+        )
+
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                image_data = part.inline_data.data
+                print(f"Generated solution image: {len(image_data)} bytes")
+                return ensure_white_background(image_data)
+
+        print("No image in Gemini response for solution")
+        return None
+
+    except Exception as e:
+        print(f"Solution image generation failed: {e}")
+        return None
+
+
 def generate_question_image(api_key, latex_string, choices=None, graph_description=None, has_graph=False):
     """
     Generate a complete question image using Gemini's image generation model.
@@ -3489,7 +3577,7 @@ def generate_question_image(api_key, latex_string, choices=None, graph_descripti
             if part.inline_data is not None:
                 image_data = part.inline_data.data
                 print(f"Generated question image: {len(image_data)} bytes")
-                return image_data
+                return ensure_white_background(image_data)
 
         print("No image in Gemini response")
         return None
@@ -3712,6 +3800,27 @@ def generate_math_twin():
             # If image generation fails, continue without it
             print(f"Warning: Question image generation failed: {e}")
 
+        # Generate a separate solution-only image (no question text)
+        solution_image_uuid = None
+        try:
+            solution_text = result.get('solution', '')
+            if solution_text:
+                print("Generating solution-only image...")
+                solution_image_data = generate_solution_image(
+                    api_key=app.config['GEMINI_API_KEY'],
+                    solution_text=solution_text
+                )
+                if solution_image_data:
+                    solution_image_uuid = str(uuid.uuid4())
+                    solution_image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{solution_image_uuid}.png")
+                    with open(solution_image_path, 'wb') as f:
+                        f.write(solution_image_data)
+                    print(f"Saved solution image: {solution_image_uuid}")
+                else:
+                    print("Solution image generation returned no data")
+        except Exception as e:
+            print(f"Warning: Solution image generation failed: {e}")
+
         response_data = {
             'question': latex_string,
             'answer': result['answer'],
@@ -3721,7 +3830,9 @@ def generate_math_twin():
             'has_graph': has_graph,
             'graph_description': graph_description if has_graph else None,
             'modified_image_id': generated_image_uuid,
-            'modified_image_url': f"/math_twin/images/{generated_image_uuid}" if generated_image_uuid else None
+            'modified_image_url': f"/math_twin/images/{generated_image_uuid}" if generated_image_uuid else None,
+            'solution_image_id': solution_image_uuid,
+            'solution_image_url': f"/math_twin/images/{solution_image_uuid}" if solution_image_uuid else None
         }
 
         return jsonify(response_data)
@@ -3857,12 +3968,34 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
         except Exception as e:
             print(f"Warning: Question image generation failed: {e}")
 
+        # Generate a separate solution-only image (no question text)
+        solution_image_url = None
+        try:
+            solution_text = result.get('solution', '')
+            if solution_text:
+                print("Generating solution-only image...")
+                solution_image_data = generate_solution_image(
+                    api_key=api_key,
+                    solution_text=solution_text
+                )
+                if solution_image_data:
+                    solution_image_uuid = str(uuid.uuid4())
+                    solution_image_path = os.path.join(app.config['IMAGE_FOLDER_TWIN'], f"{solution_image_uuid}.png")
+                    with open(solution_image_path, 'wb') as f:
+                        f.write(solution_image_data)
+                    solution_image_url = f"{base_url}/math_twin/images/{solution_image_uuid}"
+                    print(f"Saved solution image: {solution_image_uuid}")
+                else:
+                    print("Solution image generation returned no data")
+        except Exception as e:
+            print(f"Warning: Solution image generation failed: {e}")
+
         return {
             "latexString": latex_string,
             "answerString": result.get('solution', ''),
             "originalImageURL": original_url,
             "questionImageUrl": generated_image_url,
-            "answerImageUrl": generated_image_url,  # Full question image (same as questionImageUrl)
+            "answerImageUrl": solution_image_url if solution_image_url else generated_image_url,
             "isMCQ": is_mcq,
             "choices": choices,
             "answer": result.get('answer_number', 1)
