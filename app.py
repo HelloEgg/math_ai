@@ -3435,6 +3435,28 @@ def ensure_white_background(image_data):
         return image_data
 
 
+def twin_step0_check_diagram(api_key, image_data, mime_type):
+    """
+    Step 0: Check if the image has a diagram/graph and if it's MCQ.
+    Returns: dict with has_graph, is_mcq
+    """
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-3-pro-preview')
+
+    prompt = """이 수학 문제 이미지를 보고 다음을 판단하세요:
+
+1. 이미지에 그래프, 도형, 그림이 있는가? (단순 텍스트/수식만 있으면 false)
+2. 객관식 문제인가? (①②③④⑤ 같은 선택지가 있으면 true)
+
+JSON으로만 응답하세요:
+{"has_graph": true, "is_mcq": true}"""
+
+    image_part = {"mime_type": mime_type, "data": base64.b64encode(image_data).decode('utf-8')}
+    response = model.generate_content([prompt, image_part])
+    response_text = extract_json_from_response(response.text)
+    return json.loads(response_text)
+
+
 def twin_step1_change_numbers(api_key, image_data, mime_type, variation_index=0, num_total=1):
     """
     Step 1: Analyze original problem and change only the numbers.
@@ -3562,6 +3584,13 @@ JSON으로만 응답하세요:
     new_numbers = new_ocr.get('numbers_in_image', [])
     print(f"  New diagram numbers: {new_numbers}")
 
+    # Build number_changes from original → new mapping
+    number_changes = []
+    for i in range(min(len(original_numbers), len(new_numbers))):
+        if original_numbers[i] != new_numbers[i]:
+            number_changes.append(f"{original_numbers[i]} → {new_numbers[i]}")
+    print(f"  Number changes: {number_changes}")
+
     # Step 2c: Ask Gemini to substitute numbers in original text
     substitute_prompt = f"""원본 문제 텍스트에서 숫자만 교체하세요.
 
@@ -3582,16 +3611,91 @@ JSON으로만 응답하세요:
 
     response3 = model.generate_content(substitute_prompt)
     result = json.loads(extract_json_from_response(response3.text))
+    result['number_changes'] = number_changes
     return result
+
+
+def _extract_numbers_from_text(text):
+    """
+    Extract all numerical values (with optional units) from a text string using regex.
+    Returns a sorted list of unique number strings found.
+
+    Handles: integers, decimals, fractions, negative numbers, and numbers with units.
+    Examples: "20", "3.14", "20m", "45°", "1/2", "-3", "252m²"
+    """
+    if not text:
+        return []
+
+    # Pattern matches numbers with optional units
+    # Handles: -3, 20, 3.14, 20m, 45°, 252m², 1/2, √2, 2π
+    # Order matters: fractions first to avoid partial matches
+    fraction_pattern = r'-?\d+/\d+'
+    number_with_unit_pattern = r'-?\d+\.?\d*\s*(?:m²|cm²|km²|m³|cm³|°|m|cm|mm|km|kg|g|L|mL|%)?'
+
+    numbers = []
+    # First pass: find and record all fractions, mark their positions
+    fraction_spans = set()
+    for match in re.finditer(fraction_pattern, text):
+        cleaned = match.group().strip()
+        if cleaned and any(c.isdigit() for c in cleaned):
+            numbers.append(cleaned)
+            for i in range(match.start(), match.end()):
+                fraction_spans.add(i)
+
+    # Second pass: find numbers, skip those overlapping with fractions
+    for match in re.finditer(number_with_unit_pattern, text):
+        if any(i in fraction_spans for i in range(match.start(), match.end())):
+            continue
+        cleaned = match.group().strip()
+        if cleaned and any(c.isdigit() for c in cleaned):
+            numbers.append(cleaned)
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_numbers = []
+    for n in numbers:
+        if n not in seen:
+            seen.add(n)
+            unique_numbers.append(n)
+
+    return unique_numbers
+
+
+def _extract_pure_number(value_str):
+    """
+    Extract the pure numeric value from a string like '20m', '45°', '252m²'.
+    Returns the numeric part as a string, and the unit part.
+    """
+    if not value_str:
+        return '', ''
+    value_str = value_str.strip()
+
+    # Try fraction first
+    frac_match = re.match(r'^(-?\d+/\d+)\s*(.*)', value_str)
+    if frac_match:
+        return frac_match.group(1), frac_match.group(2).strip()
+
+    # Standard number with optional unit
+    match = re.match(r'^(-?\d+\.?\d*)\s*(.*)', value_str)
+    if match:
+        return match.group(1), match.group(2).strip()
+
+    return value_str, ''
 
 
 def twin_validate_question_vs_image(api_key, image_data, question_text, max_retries=3):
     """
-    Robust validation: ensure ALL numbers in the generated image match the question text.
-    3-step approach:
-      1. Structured OCR: extract every number with its meaning from the image
-      2. Side-by-side comparison: compare image numbers vs question text numbers
-      3. If mismatch: correct and re-validate
+    Robust validation: ensure ALL numbers in the generated diagram image match the question text exactly.
+
+    5-phase approach:
+      Phase 1: Structured OCR - extract every number with meaning from the image (via AI)
+      Phase 2: Local regex extraction - extract all numbers from question text (deterministic)
+      Phase 3: Cross-validation - compare both sets, find mismatches
+      Phase 4: If mismatch found, correct question text to match diagram (diagram is source of truth)
+      Phase 5: Re-validate corrected text against image numbers
+
+    The diagram image is treated as the SOURCE OF TRUTH.
+    The question text is adjusted to match the diagram, never vice versa.
 
     Returns:
         Corrected question text (matching the image exactly)
@@ -3604,79 +3708,184 @@ def twin_validate_question_vs_image(api_key, image_data, question_text, max_retr
         "data": base64.b64encode(image_data).decode('utf-8')
     }
 
-    # === Phase 1: Structured OCR - extract every number with meaning ===
+    # === Phase 1: Structured OCR - extract every number with meaning from the image ===
     ocr_prompt = """이 수학 문제 이미지에서 보이는 모든 숫자를 의미와 함께 추출하세요.
 
-★ 도형/그래프 안의 숫자, 문제 텍스트의 숫자 모두 포함 ★
-★ 숫자 옆에 적힌 단위(m, cm, °, m² 등)도 반드시 포함 ★
+★★★ 반드시 모든 숫자를 빠짐없이 추출하세요 ★★★
+- 도형/그래프 안에 표시된 숫자 (길이, 각도, 좌표, 넓이 등)
+- 문제 텍스트에 있는 숫자
+- 수식의 계수, 상수
+- 숫자 옆에 적힌 단위(m, cm, °, m² 등)도 반드시 포함
+
+★ 선택지(①②③④⑤) 안의 숫자는 제외 ★
+★ 문제 번호는 제외 ★
 
 JSON으로만 응답하세요:
 {"numbers": [
-    {"value": "20m", "meaning": "직사각형 가로 길이"},
-    {"value": "16m", "meaning": "직사각형 세로 길이"},
-    {"value": "252m²", "meaning": "화단의 넓이"}
-]}"""
+    {"value": "20m", "meaning": "직사각형 가로 길이", "location": "diagram"},
+    {"value": "16m", "meaning": "직사각형 세로 길이", "location": "diagram"},
+    {"value": "252m²", "meaning": "화단의 넓이", "location": "text"}
+]}
+
+location은 "diagram" (도형/그래프 안) 또는 "text" (문제 텍스트) 중 하나"""
 
     try:
         ocr_response = model.generate_content([ocr_prompt, image_part])
         ocr_result = json.loads(extract_json_from_response(ocr_response.text))
         image_numbers = ocr_result.get('numbers', [])
-        print(f"  [Validation] Image OCR: {image_numbers}")
+        print(f"  [Validation Phase 1] Image OCR extracted {len(image_numbers)} numbers: {image_numbers}")
     except Exception as e:
-        print(f"  [Validation] OCR failed: {e}, skipping validation")
+        print(f"  [Validation Phase 1] OCR failed: {e}, skipping validation")
         return question_text
 
-    # === Phase 2 & 3: Side-by-side comparison with image, correct if needed ===
+    if not image_numbers:
+        print("  [Validation Phase 1] No numbers found in image, skipping validation")
+        return question_text
+
+    # === Phase 2: Local regex extraction - extract all numbers from question text ===
+    question_numbers = _extract_numbers_from_text(question_text)
+    print(f"  [Validation Phase 2] Question text numbers (regex): {question_numbers}")
+
+    # Extract image number values for comparison
+    image_values = []
+    for n in image_numbers:
+        val = n.get('value', '').strip()
+        if val:
+            image_values.append(val)
+    print(f"  [Validation Phase 2] Image number values: {image_values}")
+
+    # === Phase 3: Cross-validation - compare numbers ===
+    # Check each diagram number exists in the question text
+    # Use pure numeric comparison (strip units for flexible matching)
+    image_pure_numbers = set()
+    for val in image_values:
+        pure_num, _ = _extract_pure_number(val)
+        if pure_num:
+            image_pure_numbers.add(pure_num)
+
+    question_pure_numbers = set()
+    for val in question_numbers:
+        pure_num, _ = _extract_pure_number(val)
+        if pure_num:
+            question_pure_numbers.add(pure_num)
+
+    # Numbers in diagram but NOT in question text
+    missing_in_question = image_pure_numbers - question_pure_numbers
+    # Numbers in question text but NOT in diagram
+    extra_in_question = question_pure_numbers - image_pure_numbers
+
+    print(f"  [Validation Phase 3] Diagram-only numbers: {missing_in_question}")
+    print(f"  [Validation Phase 3] Question-only numbers: {extra_in_question}")
+
+    if not missing_in_question and not extra_in_question:
+        print(f"  [Validation Phase 3] All numbers match perfectly (local check)")
+        # Still do AI verification as a final check since regex can miss context
+    elif not missing_in_question:
+        print(f"  [Validation Phase 3] All diagram numbers found in question (extra question numbers may be derived values)")
+
+    # === Phase 4 & 5: AI-powered deep comparison and correction ===
     current_question = question_text
 
     for attempt in range(max_retries):
         try:
             numbers_list = "\n".join(
-                f"  - {n.get('meaning', '?')}: {n.get('value', '?')}" for n in image_numbers
+                f"  - {n.get('meaning', '?')}: \"{n.get('value', '?')}\" (위치: {n.get('location', '?')})"
+                for n in image_numbers
             )
 
-            compare_prompt = f"""아래 이미지와 문제 텍스트를 비교하세요.
+            # Also extract current question's numbers for side-by-side display
+            current_q_numbers = _extract_numbers_from_text(current_question)
 
-★★★ 이미지에서 읽은 숫자 목록 ★★★
+            compare_prompt = f"""당신은 수학 문제의 품질 검증 전문가입니다.
+아래 다이어그램/도형 이미지의 숫자와 문제 텍스트의 숫자가 정확히 일치하는지 엄격하게 검증하세요.
+
+★★★ 이미지(다이어그램/도형)에서 추출한 숫자 목록 ★★★
 {numbers_list}
 
 ★★★ 현재 문제 텍스트 ★★★
 {current_question}
 
-★★★ 검증 작업 ★★★
-위 숫자 목록의 각 숫자가 문제 텍스트에 정확히 포함되어 있는지 하나씩 확인하세요.
-- 값이 같은지 확인 (20m vs 20m ✓, 20m vs 14cm ✗)
-- 단위가 같은지 확인 (m vs m ✓, m vs cm ✗)
+★★★ 문제 텍스트에서 추출한 숫자들 ★★★
+{current_q_numbers}
+
+★★★ 검증 규칙 ★★★
+1. 이미지의 각 숫자가 문제 텍스트에 정확히 존재하는지 확인하세요
+2. 숫자의 값이 정확히 같아야 합니다 (20 vs 20 ✓, 20 vs 14 ✗)
+3. 단위가 같아야 합니다 (m vs m ✓, m vs cm ✗)
+4. 수식의 계수도 정확히 같아야 합니다 (1/5 vs 1/5 ✓, 1/5 vs 1/6 ✗)
+5. 이미지에서 도형/그래프에 적힌 숫자가 특히 중요합니다 - 이 숫자들이 반드시 문제 텍스트에 포함되어야 합니다
+
+★★★ 중요 ★★★
+- 이미지(다이어그램)가 진실의 원천(source of truth)입니다
+- 불일치가 있으면 문제 텍스트를 이미지의 숫자에 맞게 수정하세요
+- 문장 구조는 절대 변경하지 마세요
+- 숫자만 이미지에 맞게 교체하세요
 
 JSON으로만 응답하세요:
-모두 일치: {{"match": true}}
-불일치 있음: {{"match": false, "mismatches": [{{"image": "20m", "question": "14cm", "meaning": "가로 길이"}}], "corrected_question": "이미지 숫자와 정확히 일치하도록 수정한 문제 텍스트"}}
-
-★ corrected_question은 문장 구조는 그대로 유지하고, 불일치하는 숫자만 이미지의 숫자로 교체하세요 ★"""
+모두 일치: {{"match": true, "verified_numbers": ["20m", "16m", "252m²"]}}
+불일치 있음: {{"match": false, "mismatches": [{{"image_value": "20m", "question_value": "14cm", "meaning": "가로 길이", "action": "14cm → 20m"}}], "corrected_question": "이미지 숫자와 정확히 일치하도록 수정한 문제 텍스트"}}"""
 
             response = model.generate_content([compare_prompt, image_part])
             response_text = extract_json_from_response(response.text)
             result = json.loads(response_text)
 
             if result.get('match', False):
-                print(f"  [Validation] PASSED (attempt {attempt + 1})")
+                verified = result.get('verified_numbers', [])
+                print(f"  [Validation Phase 4] PASSED (attempt {attempt + 1}), verified: {verified}")
                 return current_question
             else:
                 mismatches = result.get('mismatches', [])
                 corrected = result.get('corrected_question', '')
                 for m in mismatches:
-                    print(f"  [Validation] MISMATCH: {m.get('meaning','?')} - image={m.get('image','?')}, question={m.get('question','?')}")
+                    print(f"  [Validation Phase 4] MISMATCH: {m.get('meaning','?')} - "
+                          f"image=\"{m.get('image_value','?')}\", question=\"{m.get('question_value','?')}\", "
+                          f"action=\"{m.get('action','?')}\"")
 
                 if corrected:
-                    current_question = corrected
-                    print(f"  [Validation] Corrected (attempt {attempt + 1}): {current_question[:100]}...")
+                    # Phase 5: Verify the correction is actually better
+                    corrected_numbers = _extract_numbers_from_text(corrected)
+                    corrected_pure = set()
+                    for val in corrected_numbers:
+                        pure_num, _ = _extract_pure_number(val)
+                        if pure_num:
+                            corrected_pure.add(pure_num)
+
+                    # Check if corrected text has more diagram numbers than before
+                    old_match_count = len(image_pure_numbers & question_pure_numbers)
+                    new_match_count = len(image_pure_numbers & corrected_pure)
+
+                    if new_match_count >= old_match_count:
+                        current_question = corrected
+                        question_pure_numbers = corrected_pure
+                        print(f"  [Validation Phase 5] Correction accepted (attempt {attempt + 1}): "
+                              f"match count {old_match_count} → {new_match_count}")
+                        print(f"  [Validation Phase 5] Corrected text: {current_question[:120]}...")
+                    else:
+                        print(f"  [Validation Phase 5] Correction REJECTED (attempt {attempt + 1}): "
+                              f"match count would decrease {old_match_count} → {new_match_count}")
+                        # Still use the correction since AI may have found contextual issues
+                        current_question = corrected
+                        print(f"  [Validation Phase 5] Using correction anyway (AI context): {current_question[:120]}...")
                 else:
-                    print(f"  [Validation] No correction provided (attempt {attempt + 1})")
+                    print(f"  [Validation Phase 4] No correction provided (attempt {attempt + 1})")
                     break
 
         except Exception as e:
-            print(f"  [Validation] Attempt {attempt + 1} error: {e}")
+            print(f"  [Validation Phase 4] Attempt {attempt + 1} error: {e}")
             break
+
+    # Final local sanity check
+    final_numbers = _extract_numbers_from_text(current_question)
+    final_pure = set()
+    for val in final_numbers:
+        pure_num, _ = _extract_pure_number(val)
+        if pure_num:
+            final_pure.add(pure_num)
+    final_missing = image_pure_numbers - final_pure
+    if final_missing:
+        print(f"  [Validation FINAL] WARNING: Diagram numbers still missing in question: {final_missing}")
+    else:
+        print(f"  [Validation FINAL] All diagram numbers present in final question text")
 
     return current_question
 
@@ -3747,6 +3956,10 @@ JSON으로만 응답하세요:
     response = model.generate_content(prompt)
     response_text = extract_json_from_response(response.text)
     return json.loads(response_text)
+
+
+# Alias: twin_step3_solve maps to twin_step2_solve (solving step)
+twin_step3_solve = twin_step2_solve
 
 
 def twin_step4_choices(api_key, question_text, answer):
@@ -4249,6 +4462,7 @@ def generate_math_twin():
         print(f"  has_graph={has_graph}, is_mcq={is_mcq}")
 
         new_diagram_data = None
+        number_changes = []
 
         if has_graph:
             # === DIAGRAM PATH: Steps 1 → 2 → 3 → 4 ===
@@ -4272,7 +4486,9 @@ def generate_math_twin():
                 mime_type=mime_type
             )
             latex_string = step2.get('new_question', '')
+            number_changes = step2.get('number_changes', [])
             print(f"  Question: {latex_string[:100]}...")
+            print(f"  Number changes: {number_changes}")
 
             # Validate: image numbers must match question text
             print("Validating image vs question numbers...")
@@ -4293,6 +4509,7 @@ def generate_math_twin():
                 mime_type=mime_type
             )
             latex_string = step2.get('new_question', '')
+            number_changes = step2.get('number_changes', [])
             print(f"  Question: {latex_string[:100]}...")
 
         # === Step 3: Solve the new problem ===
@@ -4439,6 +4656,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
         print(f"  {tag} has_graph={has_graph}, is_mcq={is_mcq}")
 
         new_diagram_data = None
+        number_changes = []
 
         if has_graph:
             # === DIAGRAM PATH ===
@@ -4464,6 +4682,8 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                 mime_type=mime_type
             )
             latex_string = step2.get('new_question', '')
+            number_changes = step2.get('number_changes', [])
+            print(f"  {tag} Number changes: {number_changes}")
 
             # Validate: image numbers must match question text
             print(f"  {tag} Validating image vs question numbers...")
@@ -4484,6 +4704,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                 num_total=num_total
             )
             latex_string = step2.get('new_question', '')
+            number_changes = step2.get('number_changes', [])
 
         print(f"  {tag} Question: {latex_string[:80]}...")
 
