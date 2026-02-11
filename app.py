@@ -3585,59 +3585,97 @@ JSON으로만 응답하세요:
     return result
 
 
-def twin_validate_question_vs_image(api_key, image_data, question_text, max_retries=2):
+def twin_validate_question_vs_image(api_key, image_data, question_text, max_retries=3):
     """
-    Validate that ALL numbers in the generated image match the question text.
-    If mismatch, correct the question text by re-reading image numbers.
+    Robust validation: ensure ALL numbers in the generated image match the question text.
+    3-step approach:
+      1. Structured OCR: extract every number with its meaning from the image
+      2. Side-by-side comparison: compare image numbers vs question text numbers
+      3. If mismatch: correct and re-validate
 
     Returns:
         Corrected question text (matching the image exactly)
     """
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-3-pro-preview')
+
+    image_part = {
+        "mime_type": "image/png",
+        "data": base64.b64encode(image_data).decode('utf-8')
+    }
+
+    # === Phase 1: Structured OCR - extract every number with meaning ===
+    ocr_prompt = """이 수학 문제 이미지에서 보이는 모든 숫자를 의미와 함께 추출하세요.
+
+★ 도형/그래프 안의 숫자, 문제 텍스트의 숫자 모두 포함 ★
+★ 숫자 옆에 적힌 단위(m, cm, °, m² 등)도 반드시 포함 ★
+
+JSON으로만 응답하세요:
+{"numbers": [
+    {"value": "20m", "meaning": "직사각형 가로 길이"},
+    {"value": "16m", "meaning": "직사각형 세로 길이"},
+    {"value": "252m²", "meaning": "화단의 넓이"}
+]}"""
+
+    try:
+        ocr_response = model.generate_content([ocr_prompt, image_part])
+        ocr_result = json.loads(extract_json_from_response(ocr_response.text))
+        image_numbers = ocr_result.get('numbers', [])
+        print(f"  [Validation] Image OCR: {image_numbers}")
+    except Exception as e:
+        print(f"  [Validation] OCR failed: {e}, skipping validation")
+        return question_text
+
+    # === Phase 2 & 3: Side-by-side comparison with image, correct if needed ===
     current_question = question_text
 
     for attempt in range(max_retries):
         try:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-3-pro-preview')
+            numbers_list = "\n".join(
+                f"  - {n.get('meaning', '?')}: {n.get('value', '?')}" for n in image_numbers
+            )
 
-            validate_prompt = f"""이 이미지와 아래 문제 텍스트의 숫자가 정확히 일치하는지 검증하세요.
+            compare_prompt = f"""아래 이미지와 문제 텍스트를 비교하세요.
 
-문제 텍스트:
+★★★ 이미지에서 읽은 숫자 목록 ★★★
+{numbers_list}
+
+★★★ 현재 문제 텍스트 ★★★
 {current_question}
 
-★★★ 검증 방법 ★★★
-1. 이미지 안에 보이는 모든 숫자를 하나씩 읽으세요 (길이, 각도, 좌표, 넓이, 계수, 단위 포함)
-2. 문제 텍스트에 있는 숫자들과 하나하나 대조하세요
-3. 하나라도 다르면 불일치입니다
+★★★ 검증 작업 ★★★
+위 숫자 목록의 각 숫자가 문제 텍스트에 정확히 포함되어 있는지 하나씩 확인하세요.
+- 값이 같은지 확인 (20m vs 20m ✓, 20m vs 14cm ✗)
+- 단위가 같은지 확인 (m vs m ✓, m vs cm ✗)
 
 JSON으로만 응답하세요:
-일치: {{"match": true}}
-불일치: {{"match": false, "image_numbers": ["20m", "16m"], "question_numbers": ["14cm", "11cm"], "corrected_question": "이미지의 숫자로 교체한 문제 텍스트 (문장 구조는 유지, 숫자만 교체)"}}"""
+모두 일치: {{"match": true}}
+불일치 있음: {{"match": false, "mismatches": [{{"image": "20m", "question": "14cm", "meaning": "가로 길이"}}], "corrected_question": "이미지 숫자와 정확히 일치하도록 수정한 문제 텍스트"}}
 
-            image_part = {
-                "mime_type": "image/png",
-                "data": base64.b64encode(image_data).decode('utf-8')
-            }
+★ corrected_question은 문장 구조는 그대로 유지하고, 불일치하는 숫자만 이미지의 숫자로 교체하세요 ★"""
 
-            response = model.generate_content([validate_prompt, image_part])
+            response = model.generate_content([compare_prompt, image_part])
             response_text = extract_json_from_response(response.text)
             result = json.loads(response_text)
 
             if result.get('match', False):
-                print(f"  Validation PASSED (attempt {attempt + 1})")
+                print(f"  [Validation] PASSED (attempt {attempt + 1})")
                 return current_question
             else:
-                image_nums = result.get('image_numbers', [])
-                question_nums = result.get('question_numbers', [])
+                mismatches = result.get('mismatches', [])
                 corrected = result.get('corrected_question', '')
-                print(f"  Validation FAILED (attempt {attempt + 1}): image={image_nums}, question={question_nums}")
+                for m in mismatches:
+                    print(f"  [Validation] MISMATCH: {m.get('meaning','?')} - image={m.get('image','?')}, question={m.get('question','?')}")
 
                 if corrected:
                     current_question = corrected
-                    print(f"  Corrected: {current_question[:100]}...")
+                    print(f"  [Validation] Corrected (attempt {attempt + 1}): {current_question[:100]}...")
+                else:
+                    print(f"  [Validation] No correction provided (attempt {attempt + 1})")
+                    break
 
         except Exception as e:
-            print(f"  Validation attempt {attempt + 1} error: {e}")
+            print(f"  [Validation] Attempt {attempt + 1} error: {e}")
             break
 
     return current_question
