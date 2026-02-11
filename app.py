@@ -3468,6 +3468,68 @@ def generate_solution_image(api_key, solution_text):
         return None
 
 
+def generate_twin_image_from_original(api_key, original_image_data, number_changes):
+    """
+    Generate a twin question image by editing numbers on the original image.
+    Keeps the graph/diagram structure identical, only replaces specified numbers.
+
+    Args:
+        api_key: Gemini API key
+        original_image_data: Original image data as bytes
+        number_changes: List of number change descriptions, e.g. ["40° → 30°", "60° → 70°"]
+
+    Returns:
+        Image data as bytes, or None if generation fails
+    """
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=api_key)
+
+        changes_text = "\n".join(f"- {change}" for change in number_changes)
+
+        prompt = f"""이 수학 문제 이미지를 거의 동일하게 다시 그리되, 아래 숫자만 변경하세요.
+
+변경할 숫자:
+{changes_text}
+
+★★★ 중요 규칙 ★★★
+- 그래프, 도형, 그림의 형태와 구조는 원본과 완전히 동일하게 유지하세요
+- 점의 위치, 선의 연결, 도형의 모양은 절대 바꾸지 마세요
+- 변수명, 점 이름(A, B, C, D, O 등)은 원본 그대로 유지하세요
+- 문제 텍스트의 구조도 원본과 동일하게 유지하고 숫자만 변경하세요
+- 선택지가 있으면 선택지도 새 숫자에 맞게 변경하세요
+- 흰색 배경 (#FFFFFF)
+- 검은색 텍스트와 선
+- 원본과 동일한 레이아웃과 스타일"""
+
+        # Send original image with the editing prompt
+        response = client.models.generate_content(
+            model="gemini-3-pro-image-preview",
+            contents=[
+                prompt,
+                types.Part.from_bytes(data=original_image_data, mime_type="image/png")
+            ],
+            config=types.GenerateContentConfig(
+                response_modalities=['Image']
+            )
+        )
+
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                image_data = part.inline_data.data
+                print(f"Generated twin image from original: {len(image_data)} bytes")
+                return ensure_white_background(image_data)
+
+        print("No image in Gemini response for twin image editing")
+        return None
+
+    except Exception as e:
+        print(f"Twin image editing failed: {e}")
+        return None
+
+
 def generate_question_image(api_key, latex_string, choices=None, graph_description=None, has_graph=False):
     """
     Generate a complete question image using Gemini's image generation model.
@@ -3696,26 +3758,28 @@ def generate_math_twin():
 - 변수명(x, y, z, a, b 등)은 원본 그대로 유지하세요
 - 함수의 종류(sin, cos, log 등)는 원본 그대로 유지하세요
 - 문장 구조와 질문 형태는 원본 그대로 유지하세요
-- 오직 숫자(계수, 상수, 좌표값 등)만 다른 값으로 바꾸세요
+- 오직 숫자(계수, 상수, 좌표값, 각도 등)만 다른 값으로 바꾸세요
 
 예시:
-- 원본: "y = 2x + 3이고 x = 5일 때, y의 값은?"
-- 쌍둥이: "y = 4x + 7이고 x = 2일 때, y의 값은?"
-  (변수명 y, x는 그대로, 숫자 2→4, 3→7, 5→2만 변경)
+- 원본: "∠BDC = 60°, ∠ABD = 40°일 때, ∠ACB의 크기는?"
+- 쌍둥이: "∠BDC = 70°, ∠ABD = 30°일 때, ∠ACB의 크기는?"
+  (문장 구조 동일, 60→70, 40→30만 변경)
 
 - 원본: "함수 f(x) = x² - 3x + 2의 최솟값을 구하시오"
 - 쌍둥이: "함수 f(x) = x² - 5x + 4의 최솟값을 구하시오"
   (f(x), x² 구조 그대로, 계수만 변경)
 
 그래프/도형이 있는 경우:
-- 그래프의 종류(직선, 포물선, 원 등)는 원본 그대로 유지
-- 함수식의 형태는 그대로 유지하고 숫자만 변경
-- 축의 범위, 교점 좌표 등은 새 숫자에 맞게 자연스럽게 조정
+- 그래프/도형의 구조는 원본과 완전히 동일하게 유지
+- 이미지 안에 표시된 숫자(각도, 길이, 좌표 등)만 변경
+- number_changes에 "원본숫자 → 새숫자" 형식으로 모든 변경사항을 기록하세요
 
 중요: 먼저 이미지에 그래프, 도형, 그림이 포함되어 있는지 확인하세요.
 또한 번호가 매겨진 보기가 있는 객관식 문제(MCQ)인지 확인하세요.
 
 다음 JSON 형식으로만 응답하세요 (마크다운 없이, 코드 블록 없이, 순수 JSON만):
+
+그래프/도형이 있는 경우:
 {
     "question": "쌍둥이 수학 문제 (LaTeX 형식, 한국어로 작성)",
     "answer": "최종 답 (LaTeX 형식)",
@@ -3723,7 +3787,7 @@ def generate_math_twin():
     "is_mcq": true,
     "choices": ["① 선택지1", "② 선택지2", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"],
     "has_graph": true,
-    "graph_description": "원본과 동일한 형태의 그래프에 대한 상세 설명 (숫자만 변경). 포함사항: 1) 좌표계 (x, y축 범위), 2) 원본과 같은 종류의 곡선/함수 (숫자만 다름), 3) 색칠된 영역, 4) 모든 레이블과 위치, 5) 수직/수평선, 6) 교점. 구체적으로 작성하세요."
+    "number_changes": ["40° → 30°", "60° → 70°"]
 }
 
 그래프가 없는 텍스트 전용 문제:
@@ -3734,7 +3798,7 @@ def generate_math_twin():
     "is_mcq": true,
     "choices": ["① 선택지1", "② 선택지2", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"],
     "has_graph": false,
-    "graph_description": ""
+    "number_changes": []
 }
 
 객관식이 아닌 경우:
@@ -3745,16 +3809,16 @@ def generate_math_twin():
     "is_mcq": false,
     "choices": [],
     "has_graph": false,
-    "graph_description": ""
+    "number_changes": []
 }
 
 중요 지침:
 - 모든 내용(문제, 풀이, 선택지)은 반드시 한국어로 작성하세요
-- ★ 수식 구조/변수명/함수 종류는 절대 바꾸지 말고, 숫자(상수/계수)만 변경하세요 ★
+- ★ 수식 구조/변수명/함수 종류는 절대 바꾸지 말고, 숫자(상수/계수/각도)만 변경하세요 ★
 - is_mcq는 선택할 수 있는 번호가 매겨진 보기가 있으면 true
 - choices는 객관식인 경우 모든 보기를 배열로 제공 (①②③④⑤ 기호 포함)
 - 객관식이 아니면 choices는 빈 배열 []
-- graph_description은 원본과 동일한 형태의 그래프를 숫자만 바꿔서 설명
+- number_changes는 이미지 안의 숫자를 어떻게 바꿀지 "원본 → 변경" 형식의 배열 (그래프/도형이 있을 때만)
 - LaTeX 형식으로 모든 수학 표현식 작성
 - 풀 수 있는 문제로 만들고 명확한 답을 포함하세요
 - 같은 난이도를 유지하세요
@@ -3786,21 +3850,30 @@ def generate_math_twin():
         latex_string = result.get('question', '')
         choices = result.get('choices', [])
         has_graph = result.get('has_graph', False)
-        graph_description = result.get('graph_description', '')
+        number_changes = result.get('number_changes', [])
         is_mcq = result.get('is_mcq', False)
 
-        # Always generate a question image with latexString on top, graph in middle (if any), and choices at bottom (if MCQ)
+        # Generate question image
         generated_image_uuid = None
         try:
-            print(f"Generating question image (has_graph={has_graph}, is_mcq={is_mcq}, choices={len(choices)})...")
-
-            generated_image_data = generate_question_image(
-                api_key=app.config['GEMINI_API_KEY'],
-                latex_string=latex_string,
-                choices=choices if is_mcq else None,
-                graph_description=graph_description if has_graph else None,
-                has_graph=has_graph
-            )
+            if has_graph and number_changes:
+                # Graph/diagram exists: edit original image, only change numbers
+                print(f"Editing original image (changing numbers: {number_changes})...")
+                generated_image_data = generate_twin_image_from_original(
+                    api_key=app.config['GEMINI_API_KEY'],
+                    original_image_data=image_data,
+                    number_changes=number_changes
+                )
+            else:
+                # No graph: generate new text-only image
+                print(f"Generating question image (is_mcq={is_mcq}, choices={len(choices)})...")
+                generated_image_data = generate_question_image(
+                    api_key=app.config['GEMINI_API_KEY'],
+                    latex_string=latex_string,
+                    choices=choices if is_mcq else None,
+                    graph_description=None,
+                    has_graph=False
+                )
 
             if generated_image_data:
                 # Save generated image to disk
@@ -3844,7 +3917,7 @@ def generate_math_twin():
             'is_mcq': is_mcq,
             'choices': choices,
             'has_graph': has_graph,
-            'graph_description': graph_description if has_graph else None,
+            'number_changes': number_changes if has_graph else None,
             'modified_image_id': generated_image_uuid,
             'modified_image_url': f"/math_twin/images/{generated_image_uuid}" if generated_image_uuid else None,
             'solution_image_id': solution_image_uuid,
@@ -3902,17 +3975,19 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
 - 변수명(x, y, z, a, b 등)은 원본 그대로 유지하세요
 - 함수의 종류(sin, cos, log 등)는 원본 그대로 유지하세요
 - 문장 구조와 질문 형태는 원본 그대로 유지하세요
-- 오직 숫자(계수, 상수, 좌표값 등)만 다른 값으로 바꾸세요
+- 오직 숫자(계수, 상수, 좌표값, 각도 등)만 다른 값으로 바꾸세요
 
 그래프/도형이 있는 경우:
-- 그래프의 종류(직선, 포물선, 원 등)는 원본 그대로 유지
-- 함수식의 형태는 그대로 유지하고 숫자만 변경
-- 축의 범위, 교점 좌표 등은 새 숫자에 맞게 자연스럽게 조정
+- 그래프/도형의 구조는 원본과 완전히 동일하게 유지
+- 이미지 안에 표시된 숫자(각도, 길이, 좌표 등)만 변경
+- number_changes에 "원본숫자 → 새숫자" 형식으로 모든 변경사항을 기록하세요
 
 중요: 먼저 이미지에 그래프, 도형, 그림이 포함되어 있는지 확인하세요.
 또한 번호가 매겨진 보기가 있는 객관식 문제(MCQ)인지 확인하세요.
 
 다음 JSON 형식으로만 응답하세요 (마크다운 없이, 코드 블록 없이, 순수 JSON만):
+
+그래프/도형이 있는 경우:
 {
     "question": "쌍둥이 수학 문제 (LaTeX 형식, 전체 문제 텍스트, 한국어로 작성)",
     "answer_number": 1,
@@ -3920,7 +3995,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
     "is_mcq": true,
     "choices": ["① 선택지1", "② 선택지2", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"],
     "has_graph": true,
-    "graph_description": "원본과 동일한 형태의 그래프에 대한 상세 설명 (숫자만 변경). 포함사항: 1) 좌표계 (x, y축 범위), 2) 원본과 같은 종류의 곡선/함수 (숫자만 다름), 3) 색칠된 영역, 4) 모든 레이블과 위치, 5) 수직/수평선. 구체적으로 작성하세요."
+    "number_changes": ["40° → 30°", "60° → 70°"]
 }
 
 그래프가 없는 텍스트 전용 문제:
@@ -3931,7 +4006,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
     "is_mcq": true,
     "choices": ["① 선택지1", "② 선택지2", "③ 선택지3", "④ 선택지4", "⑤ 선택지5"],
     "has_graph": false,
-    "graph_description": ""
+    "number_changes": []
 }
 
 객관식이 아닌 경우:
@@ -3942,17 +4017,17 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
     "is_mcq": false,
     "choices": [],
     "has_graph": false,
-    "graph_description": ""
+    "number_changes": []
 }
 
 중요 지침:
 - 모든 내용(문제, 풀이, 선택지)은 반드시 한국어로 작성하세요
-- ★ 수식 구조/변수명/함수 종류는 절대 바꾸지 말고, 숫자(상수/계수)만 변경하세요 ★
+- ★ 수식 구조/변수명/함수 종류는 절대 바꾸지 말고, 숫자(상수/계수/각도)만 변경하세요 ★
 - answer_number는 객관식 문제의 정답 번호(1, 2, 3, 4, 또는 5)
 - is_mcq는 선택할 수 있는 번호가 매겨진 보기가 있으면 true
 - choices는 객관식인 경우 모든 보기를 배열로 제공 (①②③④⑤ 기호 포함)
 - 객관식이 아니면 choices는 빈 배열 []
-- graph_description은 원본과 동일한 형태의 그래프를 숫자만 바꿔서 설명
+- number_changes는 이미지 안의 숫자를 어떻게 바꿀지 "원본 → 변경" 형식의 배열 (그래프/도형이 있을 때만)
 - 유효한 JSON만 응답하세요, 추가 텍스트 없이"""
 
         image_part = {
@@ -3968,21 +4043,30 @@ def generate_single_twin(api_key, image_data, original_url, base_url):
         latex_string = result.get('question', '')
         choices = result.get('choices', [])
         has_graph = result.get('has_graph', False)
-        graph_description = result.get('graph_description', '')
+        number_changes = result.get('number_changes', [])
         is_mcq = result.get('is_mcq', True)
 
-        # Always generate a question image with latexString on top, graph in middle (if any), and choices at bottom (if MCQ)
+        # Generate question image
         generated_image_url = None
         try:
-            print(f"Generating question image (has_graph={has_graph}, is_mcq={is_mcq}, choices={len(choices)})...")
-
-            generated_image_data = generate_question_image(
-                api_key=api_key,
-                latex_string=latex_string,
-                choices=choices if is_mcq else None,
-                graph_description=graph_description if has_graph else None,
-                has_graph=has_graph
-            )
+            if has_graph and number_changes:
+                # Graph/diagram exists: edit original image, only change numbers
+                print(f"Editing original image (changing numbers: {number_changes})...")
+                generated_image_data = generate_twin_image_from_original(
+                    api_key=api_key,
+                    original_image_data=image_data,
+                    number_changes=number_changes
+                )
+            else:
+                # No graph: generate new text-only image
+                print(f"Generating question image (is_mcq={is_mcq}, choices={len(choices)})...")
+                generated_image_data = generate_question_image(
+                    api_key=api_key,
+                    latex_string=latex_string,
+                    choices=choices if is_mcq else None,
+                    graph_description=None,
+                    has_graph=False
+                )
 
             if generated_image_data:
                 generated_image_uuid = str(uuid.uuid4())
