@@ -3437,8 +3437,8 @@ def ensure_white_background(image_data):
 
 def twin_step1_change_numbers(api_key, image_data, mime_type, variation_index=0, num_total=1):
     """
-    Step 1: Analyze original problem and change only the numbers.
-    Returns: dict with question, has_graph, is_mcq, number_changes
+    Step 1: OCR the original problem completely, then change only the numbers.
+    Returns: dict with original_question, new_question, has_graph, is_mcq, number_changes
     """
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-2.0-flash')
@@ -3449,26 +3449,40 @@ def twin_step1_change_numbers(api_key, image_data, mime_type, variation_index=0,
 ★ 변형 {variation_index + 1}/{num_total}: 다른 변형들과 겹치지 않는 숫자를 사용하세요.
 변형마다 숫자를 다르게: 1=약간 줄임, 2=약간 늘림, 3=크게 줄임, 4=크게 늘림."""
 
-    prompt = f"""이 수학 문제 이미지를 분석하세요.
+    prompt = f"""이 수학 문제 이미지를 OCR로 완벽하게 읽어주세요.
 
-1. 문제의 전체 텍스트를 정확히 읽어서 기록하세요
-2. 숫자(계수, 상수, 좌표값, 각도, 넓이 등)만 바꿔서 새로운 문제를 만드세요
-3. 수식 구조, 변수명, 함수 종류, 문장 구조는 절대 변경하지 마세요
+★★★ 1단계: 완전한 OCR ★★★
+이미지에 보이는 모든 텍스트를 빠짐없이 읽으세요:
+- 문제 번호, 문제 텍스트
+- 수식, 방정식, 부등식
+- 그래프/도형 안에 적힌 모든 숫자 (좌표, 각도, 길이, 넓이, 방정식 등)
+- 선택지 (①②③④⑤)
+- 축 라벨, 점 이름 등
+
+★★★ 2단계: 숫자만 변경 ★★★
+- 문제 텍스트의 숫자를 변경하세요
+- 그래프/도형 안의 숫자도 같은 규칙으로 변경하세요
+- 수식 구조, 변수명, 함수 종류, 문장 구조는 절대 변경하지 마세요
+- 변경된 숫자들이 수학적으로 유효하도록 (예: 각도 합이 맞도록) 주의하세요
 {variation_hint}
 
-이미지에 그래프/도형/그림이 있는지 확인하세요.
-번호가 매겨진 선택지(객관식)가 있는지 확인하세요.
+★★★ 3단계: number_changes에 모든 변경 기록 ★★★
+- 문제 텍스트에서 변경된 숫자
+- 그래프/도형 안에서 변경된 숫자 (이것이 중요!)
+- 모든 변경사항을 빠짐없이 기록하세요
 
 JSON으로만 응답하세요:
 {{
-    "original_question": "원본 문제 전체 텍스트",
+    "original_question": "원본 문제 전체 텍스트 (이미지에서 읽은 그대로, LaTeX)",
     "new_question": "숫자만 바꾼 새 문제 전체 텍스트 (LaTeX, 한국어)",
     "has_graph": true,
     "is_mcq": true,
-    "number_changes": ["18m → 20m", "14m → 12m", "216m² → 130m²"]
+    "number_changes": ["40° → 50°", "60° → 70°", "y = -1/5x² → y = -1/3x²"],
+    "graph_numbers_in_new": ["50°", "70°", "y = -1/3x²"]
 }}
 
-number_changes: 원본→새숫자 형식. 이미지 안의 숫자 변경사항."""
+★ number_changes: 원본→새숫자 형식. 텍스트+그래프 안의 모든 숫자 변경사항
+★ graph_numbers_in_new: 새 문제의 그래프/도형 안에 표시되어야 할 모든 숫자 목록"""
 
     image_part = {"mime_type": mime_type, "data": base64.b64encode(image_data).decode('utf-8')}
     response = model.generate_content([prompt, image_part])
@@ -3592,16 +3606,16 @@ def generate_solution_image(api_key, solution_text):
         return None
 
 
-def generate_twin_image_from_original(api_key, original_image_data, number_changes, choices=None):
+def generate_twin_image_from_original(api_key, original_image_data, number_changes, new_question_text=None, choices=None):
     """
     Generate a twin question image by editing numbers on the original image.
     Keeps the graph/diagram structure identical, only replaces specified numbers.
-    Also updates choices in the image if provided.
 
     Args:
         api_key: Gemini API key
         original_image_data: Original image data as bytes
         number_changes: List of number change descriptions, e.g. ["40° → 30°", "60° → 70°"]
+        new_question_text: The full new question text (authoritative reference for all numbers)
         choices: List of new choices to display, e.g. ["① 1m", "② 2m", ...]
 
     Returns:
@@ -3615,6 +3629,13 @@ def generate_twin_image_from_original(api_key, original_image_data, number_chang
 
         changes_text = "\n".join(f"- {change}" for change in number_changes)
 
+        question_ref = ""
+        if new_question_text:
+            question_ref = f"""
+
+★★★ 새 문제의 전체 텍스트 (이 숫자들과 정확히 일치해야 함) ★★★
+{new_question_text}"""
+
         choices_text = ""
         if choices and len(choices) > 0:
             choices_list = "\n".join(f"- {c}" for c in choices)
@@ -3627,16 +3648,18 @@ def generate_twin_image_from_original(api_key, original_image_data, number_chang
 
 변경할 숫자:
 {changes_text}
+{question_ref}
 {choices_text}
 
-★★★ 중요 규칙 ★★★
-- 그래프, 도형, 그림의 형태와 구조는 원본과 완전히 동일하게 유지하세요
-- 점의 위치, 선의 연결, 도형의 모양은 절대 바꾸지 마세요
-- 변수명, 점 이름(A, B, C, D, O 등)은 원본 그대로 유지하세요
-- 문제 텍스트의 구조도 원본과 동일하게 유지하고 숫자만 변경하세요
-- 흰색 배경 (#FFFFFF)
-- 검은색 텍스트와 선
-- 원본과 동일한 레이아웃과 스타일"""
+★★★ 절대 규칙 ★★★
+1. 그래프, 도형, 그림의 형태와 구조는 원본과 완전히 동일하게 유지
+2. 점의 위치, 선의 연결, 도형의 모양은 절대 바꾸지 않음
+3. 변수명, 점 이름(A, B, C, D, O 등)은 원본 그대로
+4. 위에 명시된 "변경할 숫자"만 정확히 변경
+5. 그래프 안의 방정식, 좌표, 각도, 길이 등의 숫자도 위 변경 목록대로 정확히 변경
+6. 이미지에 나타나는 모든 숫자가 위 "새 문제의 전체 텍스트"와 정확히 일치해야 함
+7. 흰색 배경 (#FFFFFF), 검은색 텍스트와 선
+8. 원본과 동일한 레이아웃과 스타일"""
 
         # Send original image with the editing prompt
         response = client.models.generate_content(
@@ -4030,12 +4053,13 @@ def generate_math_twin():
         generated_image_uuid = None
         try:
             if has_graph and number_changes:
-                # Graph/diagram exists: edit original image, change numbers + choices
+                # Graph/diagram exists: edit original image with exact number changes
                 print(f"Step 3: Editing original image (changing numbers: {number_changes})...")
                 generated_image_data = generate_twin_image_from_original(
                     api_key=api_key,
                     original_image_data=image_data,
                     number_changes=number_changes,
+                    new_question_text=latex_string,
                     choices=choices if is_mcq else None
                 )
             else:
@@ -4050,7 +4074,7 @@ def generate_math_twin():
                 )
 
             if generated_image_data:
-                # Verify image-text consistency before saving
+                # Verify image-text consistency
                 print("Verifying image-text consistency...")
                 generated_image_data = verify_image_text_consistency(
                     api_key=api_key,
@@ -4184,6 +4208,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                     api_key=api_key,
                     original_image_data=image_data,
                     number_changes=number_changes,
+                    new_question_text=latex_string,
                     choices=choices if is_mcq else None
                 )
             else:
