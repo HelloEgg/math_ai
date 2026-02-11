@@ -3550,6 +3550,74 @@ JSON으로만 응답하세요:
     return json.loads(response_text)
 
 
+def twin_validate_question_vs_image(api_key, image_data, question_text, max_retries=2):
+    """
+    Validate that ALL numbers in the generated image match the question text exactly.
+    If mismatch, re-read the image and regenerate the question text.
+
+    Args:
+        api_key: Gemini API key
+        image_data: Generated diagram image data
+        question_text: The question text to validate
+        max_retries: Max retries if mismatch found
+
+    Returns:
+        Corrected question text (matching the image exactly)
+    """
+    current_question = question_text
+
+    for attempt in range(max_retries):
+        try:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-2.0-flash')
+
+            validate_prompt = f"""이 이미지를 보고, 아래 문제 텍스트의 숫자가 이미지 안의 숫자와 정확히 일치하는지 검증하세요.
+
+문제 텍스트:
+{current_question}
+
+★★★ 검증 방법 ★★★
+1. 이미지 안에 보이는 모든 숫자를 읽으세요 (길이, 각도, 좌표, 넓이, 계수 등)
+2. 문제 텍스트에 있는 숫자와 하나하나 비교하세요
+3. 단위도 확인하세요 (m, cm, °, m² 등)
+
+JSON으로만 응답하세요:
+일치하면: {{"match": true}}
+불일치하면: {{"match": false, "image_numbers": ["16m", "12m", "154m²"], "question_numbers": ["14cm", "11cm", "154m²"], "corrected_question": "이미지 숫자에 맞게 수정된 문제 텍스트 (LaTeX, 한국어)"}}
+
+★ 불일치 시, corrected_question은 이미지에 보이는 숫자를 정확히 사용해야 합니다 ★"""
+
+            image_part = {
+                "mime_type": "image/png",
+                "data": base64.b64encode(image_data).decode('utf-8')
+            }
+
+            response = model.generate_content([validate_prompt, image_part])
+            response_text = extract_json_from_response(response.text)
+            result = json.loads(response_text)
+
+            if result.get('match', False):
+                print(f"  Validation PASSED (attempt {attempt + 1}): image numbers match question")
+                return current_question
+            else:
+                image_nums = result.get('image_numbers', [])
+                question_nums = result.get('question_numbers', [])
+                corrected = result.get('corrected_question', '')
+                print(f"  Validation FAILED (attempt {attempt + 1}): image={image_nums}, question={question_nums}")
+
+                if corrected:
+                    current_question = corrected
+                    print(f"  Corrected question: {current_question[:100]}...")
+                else:
+                    print(f"  No corrected question provided, keeping current")
+
+        except Exception as e:
+            print(f"  Validation attempt {attempt + 1} error: {e}")
+            break
+
+    return current_question
+
+
 def twin_step2_question_no_diagram(api_key, image_data, mime_type, variation_index=0, num_total=1):
     """
     Step 2.2 (no diagram): Read the original question and generate a new question with only numbers changed.
@@ -3949,6 +4017,15 @@ def generate_math_twin():
             )
             latex_string = step2.get('new_question', '')
             print(f"  Question: {latex_string[:100]}...")
+
+            # Validate: image numbers must match question text
+            print("Validating image vs question numbers...")
+            latex_string = twin_validate_question_vs_image(
+                api_key=api_key,
+                image_data=new_diagram_data,
+                question_text=latex_string
+            )
+            print(f"  Validated question: {latex_string[:100]}...")
         else:
             # === NO DIAGRAM PATH: Step 2.2 → 3 → 4 ===
 
@@ -4118,6 +4195,14 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                 mime_type=mime_type
             )
             latex_string = step2.get('new_question', '')
+
+            # Validate: image numbers must match question text
+            print(f"  {tag} Validating image vs question numbers...")
+            latex_string = twin_validate_question_vs_image(
+                api_key=api_key,
+                image_data=new_diagram_data,
+                question_text=latex_string
+            )
         else:
             # === NO DIAGRAM PATH ===
             # Step 2.2: Generate new question with only numbers changed
