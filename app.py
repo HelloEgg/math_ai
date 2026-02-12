@@ -3380,6 +3380,100 @@ def extract_json_from_response(response_text):
     return response_text
 
 
+def safe_parse_json(response_text, context=""):
+    """Safely parse JSON from Gemini response with fallback extraction.
+
+    Handles common issues:
+    - Empty responses (safety filter, rate limit)
+    - Non-JSON text mixed with JSON
+    - Markdown-wrapped JSON
+
+    Args:
+        response_text: Raw response text from Gemini
+        context: Description of the calling step (for error logging)
+
+    Returns:
+        Parsed dict/list
+
+    Raises:
+        ValueError: If JSON cannot be extracted after all attempts
+    """
+    if not response_text or not response_text.strip():
+        raise ValueError(f"Empty response from Gemini API ({context})")
+
+    # First try: extract_json_from_response + json.loads
+    cleaned = extract_json_from_response(response_text)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Second try: find JSON object/array in the raw text using brace matching
+    text = response_text.strip()
+    for start_char, end_char in [('{', '}'), ('[', ']')]:
+        start_idx = text.find(start_char)
+        if start_idx == -1:
+            continue
+        # Find the matching closing brace/bracket
+        depth = 0
+        for i in range(start_idx, len(text)):
+            if text[i] == start_char:
+                depth += 1
+            elif text[i] == end_char:
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start_idx:i+1]
+                    candidate = fix_latex_escaping(candidate)
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break
+
+    raise ValueError(
+        f"Failed to parse JSON from Gemini response ({context}). "
+        f"Response preview: {response_text[:200]}"
+    )
+
+
+def gemini_generate_json(model, contents, context="", max_retries=3):
+    """Call Gemini generate_content and parse the JSON response with retries.
+
+    Retries on empty responses, safety blocks, and JSON parse failures.
+
+    Args:
+        model: Gemini GenerativeModel instance
+        contents: prompt string or list (prompt + image parts)
+        context: Description for error logging
+        max_retries: Number of attempts (default 3)
+
+    Returns:
+        Parsed dict/list from the JSON response
+
+    Raises:
+        ValueError: If all retries fail
+    """
+    import time
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            response = model.generate_content(contents)
+            # response.text can raise ValueError if no candidates (safety block)
+            response_text = response.text
+            return safe_parse_json(response_text, context=context)
+        except Exception as e:
+            last_error = e
+            wait_sec = 2 ** attempt  # 1s, 2s, 4s
+            print(f"  [{context}] Attempt {attempt+1}/{max_retries} failed: {e}")
+            if attempt < max_retries - 1:
+                print(f"  [{context}] Retrying in {wait_sec}s...")
+                time.sleep(wait_sec)
+
+    raise ValueError(
+        f"All {max_retries} attempts failed for {context}. Last error: {last_error}"
+    )
+
+
 def ensure_white_background(image_data):
     """
     Post-process generated image to ensure pure white background.
@@ -3452,9 +3546,7 @@ JSON으로만 응답하세요:
 {"has_graph": true, "is_mcq": true}"""
 
     image_part = {"mime_type": mime_type, "data": base64.b64encode(image_data).decode('utf-8')}
-    response = model.generate_content([prompt, image_part])
-    response_text = extract_json_from_response(response.text)
-    return json.loads(response_text)
+    return gemini_generate_json(model, [prompt, image_part], context="twin_step0_check_diagram")
 
 
 def twin_step1_change_numbers(api_key, image_data, mime_type, variation_index=0, num_total=1):
@@ -3474,9 +3566,7 @@ JSON으로만 응답하세요:
 {"has_graph": true, "is_mcq": true}"""
 
     image_part = {"mime_type": mime_type, "data": base64.b64encode(image_data).decode('utf-8')}
-    response = model.generate_content([prompt, image_part])
-    response_text = extract_json_from_response(response.text)
-    return json.loads(response_text)
+    return gemini_generate_json(model, [prompt, image_part], context="twin_step1_change_numbers")
 
 
 def twin_step1_change_diagram(api_key, original_image_data, mime_type="image/png", variation_index=0, num_total=1):
@@ -3520,8 +3610,7 @@ diagram_numbers: 도형/그래프/그림 안에 적힌 숫자들 (순수 숫자)
 text_numbers: 문제 텍스트에만 있는 숫자들 (순수 숫자)"""
 
     image_part = {"mime_type": mime_type, "data": base64.b64encode(original_image_data).decode('utf-8')}
-    response = model.generate_content([ocr_prompt, image_part])
-    ocr_result = json.loads(extract_json_from_response(response.text))
+    ocr_result = gemini_generate_json(model, [ocr_prompt, image_part], context="twin_step1_change_diagram OCR")
 
     original_question = ocr_result.get('question_text', '')
     diagram_numbers = ocr_result.get('diagram_numbers', [])
@@ -3574,8 +3663,7 @@ JSON으로만 응답하세요:
 
 number_changes: 원본숫자(key) → 새숫자(value) 매핑"""
 
-    change_response = model.generate_content(change_prompt)
-    change_result = json.loads(extract_json_from_response(change_response.text))
+    change_result = gemini_generate_json(model, change_prompt, context="twin_step1_change_diagram number changes")
     number_changes = change_result.get('number_changes', {})
     print(f"  Step 1b: Decided number changes: {number_changes}")
 
@@ -3738,9 +3826,7 @@ JSON으로만 응답하세요:
 number_changes: 원본→새숫자 형식. 이미지 안의 숫자 변경사항."""
 
     image_part = {"mime_type": mime_type, "data": base64.b64encode(image_data).decode('utf-8')}
-    response = model.generate_content([prompt, image_part])
-    response_text = extract_json_from_response(response.text)
-    return json.loads(response_text)
+    return gemini_generate_json(model, [prompt, image_part], context="twin_step2_question_no_diagram")
 
 
 def twin_step2_solve(api_key, question_text, diagram_image_data=None):
@@ -3797,7 +3883,7 @@ JSON으로만 응답하세요:
             "mime_type": "image/png",
             "data": base64.b64encode(diagram_image_data).decode('utf-8')
         }
-        response = model.generate_content([prompt, image_part])
+        return gemini_generate_json(model, [prompt, image_part], context="twin_step2_solve (image)")
     else:
         # === FALLBACK: Solve from text only ===
         prompt = f"""다음 수학 문제를 처음부터 단계별로 풀어보세요.
@@ -3819,10 +3905,7 @@ JSON으로만 응답하세요:
 JSON으로만 응답하세요:
 {{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답 (정확한 값, 근사값 금지)"}}"""
 
-        response = model.generate_content(prompt)
-
-    response_text = extract_json_from_response(response.text)
-    return json.loads(response_text)
+        return gemini_generate_json(model, prompt, context="twin_step2_solve (text)")
 
 
 # Alias: twin_step3_solve maps to twin_step2_solve (solving step)
@@ -3860,9 +3943,7 @@ JSON으로만 응답하세요:
 
 answer_number는 정답이 들어있는 선택지 번호 (1~5)"""
 
-    response = model.generate_content(prompt)
-    response_text = extract_json_from_response(response.text)
-    return json.loads(response_text)
+    return gemini_generate_json(model, prompt, context="twin_step4_choices")
 
 
 def generate_solution_image(api_key, solution_text):
@@ -4038,9 +4119,7 @@ JSON으로만 응답하세요:
                 "data": base64.b64encode(image_data).decode('utf-8')
             }
 
-            response = model.generate_content([verify_prompt, image_part])
-            response_text = extract_json_from_response(response.text)
-            verify_result = json.loads(response_text)
+            verify_result = gemini_generate_json(model, [verify_prompt, image_part], context="verify image-text consistency")
 
             if verify_result.get('is_consistent', False):
                 print(f"Image-text consistency PASSED (attempt {attempt + 1})")
