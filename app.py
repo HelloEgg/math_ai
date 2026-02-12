@@ -3474,6 +3474,42 @@ def gemini_generate_json(model, contents, context="", max_retries=3):
     )
 
 
+def is_clean_answer(answer_str):
+    """Check if the answer is a clean integer or fraction (not irrational like √, π, etc.).
+
+    Returns True for: "3", "-5", "1/2", "-3/4", "0"
+    Returns False for: "2√3", "1+√2", "3π/4", "2.5", "", None
+    """
+    import re
+    if not answer_str or not isinstance(answer_str, str):
+        return False
+
+    answer = answer_str.strip()
+    if not answer:
+        return False
+
+    # Reject if contains irrational indicators
+    irrational_patterns = ['√', 'sqrt', 'π', 'pi', '\\pi', '\\sqrt']
+    for pattern in irrational_patterns:
+        if pattern in answer:
+            return False
+
+    # Accept pure integer (possibly negative)
+    if re.fullmatch(r'-?\d+', answer):
+        return True
+
+    # Accept fraction like "1/2", "-3/4", "12/5"
+    if re.fullmatch(r'-?\d+/\d+', answer):
+        return True
+
+    # Accept decimal that is actually a terminating decimal (clean)
+    # e.g. "2.5", "0.25" — these are rational
+    if re.fullmatch(r'-?\d+\.\d+', answer):
+        return True
+
+    return False
+
+
 def ensure_white_background(image_data):
     """
     Post-process generated image to ensure pure white background.
@@ -3632,7 +3668,7 @@ text_numbers: 문제 텍스트에만 있는 숫자들 (순수 숫자)"""
         variation_hint = f"\n★ 변형 {variation_index+1}/{num_total}: {hint}"
 
     change_prompt = f"""당신은 수학 문제의 쌍둥이 문제를 만드는 전문가입니다.
-아래 문제의 숫자를 바꿔서 난이도가 동일하고 정답이 깔끔한 새 문제를 만들어야 합니다.
+아래 문제의 숫자를 바꿔서 난이도가 동일하고 정답이 반드시 깔끔한 정수 또는 분수가 되는 새 문제를 만들어야 합니다.
 
 원본 문제 텍스트:
 {original_question}
@@ -3641,22 +3677,31 @@ text_numbers: 문제 텍스트에만 있는 숫자들 (순수 숫자)"""
 문제 텍스트 숫자: {text_numbers}
 {variation_hint}
 
+★★★ 정답 조건 (절대 준수) ★★★
+- 정답은 반드시 정수(예: 3, 5, 12) 또는 깔끔한 분수(예: 1/2, 3/4)여야 합니다
+- √(루트), π(파이), 무리수, 소수점이 긴 수는 절대 정답이 될 수 없습니다
+- 이 조건을 만족하지 않으면 실패입니다. 반드시 역산으로 확인하세요!
+
 ★★★ 반드시 아래 3단계를 순서대로 수행하세요 ★★★
 
 【1단계: 문제 구조 분석】
 - 문제에서 '상수(주어진 숫자)', '변수(구해야 하는 값)', '조건'을 추출하세요
 - 문제를 풀기 위한 핵심 방정식을 수립하세요
 - 예: 직사각형 가로 A, 세로 B, 폭 x인 길 n개 → (A - nx)(B - mx) = S
+- 문제의 구조(도형 형태, 길의 개수, 조건의 수)는 절대 변경하지 마세요
 
-【2단계: 정답 먼저 설정 → 역산】
+【2단계: 정답 먼저 정수로 설정 → 역산】
 - 정답(변수 x)을 먼저 깔끔한 정수(예: 1, 2, 3, 4, 5...)로 설정하세요
 - 설정한 정답을 방정식에 대입하여, 나머지 숫자(상수)들을 역산하세요
-- 예: x=2로 설정 → (A-2n)(B-2m) = S가 되도록 A, B, S를 계산
-- A, B 등은 원본 문제의 스케일과 비슷하게 유지하세요
+- 예: x=3으로 설정 → (A-3n)(B-3m) = S가 되도록 A, B, S를 계산
+- A, B 등은 원본 문제의 스케일과 비슷하게 유지하세요 (양의 정수)
+- 역산된 숫자가 자연수가 아니면, 다른 정답(x=2, x=4 등)으로 재시도하세요
 
-【3단계: 검증】
-- 역산한 숫자들로 문제를 다시 풀어서 정답이 설정한 정수가 맞는지 확인하세요
-- 음수 근이나 불합리한 값이 나오면 다른 정답으로 다시 시도하세요
+【3단계: 검증 (필수!)】
+- 역산한 숫자들로 문제를 처음부터 다시 풀어보세요
+- 정답이 2단계에서 설정한 정수와 정확히 일치하는지 확인하세요
+- 일치하지 않으면 2단계로 돌아가서 다른 정답으로 재시도하세요
+- 음수 근이나 √가 나오면 실패 → 다른 정답으로 재시도
 
 JSON으로만 응답하세요:
 {{"number_changes": {{"18": "20", "14": "12", "208": "192"}}}}
@@ -3795,6 +3840,11 @@ def twin_step2_question_no_diagram(api_key, image_data, mime_type, variation_ind
     prompt = f"""이 수학 문제 이미지를 분석하여 쌍둥이 문제를 만드세요.
 {variation_hint}
 
+★★★ 정답 조건 (절대 준수) ★★★
+- 정답은 반드시 정수(예: 3, 5, 12) 또는 깔끔한 분수(예: 1/2, 3/4)여야 합니다
+- √(루트), π(파이), 무리수, 소수점이 긴 수는 절대 정답이 될 수 없습니다
+- 이 조건을 만족하지 않으면 실패입니다. 반드시 역산으로 확인하세요!
+
 ★★★ 반드시 아래 단계를 순서대로 수행하세요 ★★★
 
 【1단계: 원본 분석】
@@ -3802,13 +3852,16 @@ def twin_step2_question_no_diagram(api_key, image_data, mime_type, variation_ind
 - '상수(주어진 숫자)', '변수(구해야 하는 값)', '조건'을 추출하세요
 - 핵심 방정식을 수립하세요
 
-【2단계: 정답 먼저 설정 → 역산】
+【2단계: 정답 먼저 정수로 설정 → 역산】
 - 정답(변수)을 먼저 깔끔한 정수(예: 1, 2, 3, 4, 5...)로 설정하세요
 - 그 정답을 방정식에 대입하여, 문제의 나머지 숫자들을 역산하세요
-- 원본 문제의 스케일과 비슷하게 유지하세요
+- 원본 문제의 스케일과 비슷하게 유지하세요 (양의 정수)
+- 역산된 숫자가 자연수가 아니면, 다른 정답(x=2, x=4 등)으로 재시도하세요
 
-【3단계: 검증 후 출력】
-- 역산한 숫자들로 문제를 다시 풀어서 정답이 맞는지 확인하세요
+【3단계: 검증 (필수!)】
+- 역산한 숫자들로 문제를 처음부터 다시 풀어서 정답이 맞는지 확인하세요
+- 정답이 설정한 정수와 정확히 일치하는지 확인하세요
+- √가 나오거나 일치하지 않으면 2단계로 돌아가서 다른 정답으로 재시도하세요
 - 수식 구조, 변수명, 함수 종류, 문장 구조는 절대 변경하지 마세요
 
 이미지에 그래프/도형/그림이 있는지 확인하세요.
@@ -3856,8 +3909,8 @@ def twin_step2_solve(api_key, question_text, diagram_image_data=None):
 - 이미지에 세로 길 2개가 보이면 반드시 세로 길 2개로 풀어야 합니다
 - 이미지에 가로 길 3개가 보이면 반드시 가로 길 3개로 풀어야 합니다
 - "깔끔한 정수가 안 나온다"는 이유로 문제 구조를 바꾸는 것은 절대 금지입니다
-- 정답이 분수, 루트, 소수여도 괜찮습니다. 이미지 그대로 푸세요
 - 문제를 단순화하거나 재해석하지 마세요
+- 이미지에 보이는 그대로만 풀어야 합니다!
 
 ★★★ 1단계: 이미지 정밀 분석 (반드시 먼저 수행) ★★★
 풀이를 시작하기 전에, 이미지를 꼼꼼히 분석하여 다음을 정확히 파악하세요:
@@ -3881,14 +3934,12 @@ def twin_step2_solve(api_key, question_text, diagram_image_data=None):
 - 검산(확인, 검증) 과정은 포함하지 마세요
 
 ★★★ 정답 형식 ★★★
-- 정답은 반드시 정확한 값으로 표현하세요
+- 정답은 정수(예: "3", "12") 또는 분수(예: "1/2", "3/4")로 나올 것입니다
+- 정답을 정수 또는 분수 형태로 표현하세요
 - 근사값(소수점 근사)은 절대 사용하지 마세요
-- 정수, 분수, 루트(√) 등 정확한 수학적 표현을 사용하세요
-  예: "3", "1/2", "2√3", "1+√2", "3π/4"
-- 정답이 정수가 아니어도 전혀 문제없습니다!
 
 JSON으로만 응답하세요:
-{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답 (정확한 값, 근사값 금지)"}"""
+{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답 (정수 또는 분수)"}"""
 
         image_part = {
             "mime_type": "image/png",
@@ -3906,7 +3957,6 @@ JSON으로만 응답하세요:
 - 문제의 구조, 조건, 숫자를 절대 변경하지 마세요
 - 문제에 주어진 그대로 풀어야 합니다
 - "깔끔한 정수가 안 나온다"는 이유로 문제를 바꾸는 것은 절대 금지입니다
-- 정답이 분수, 루트, 소수여도 괜찮습니다
 
 ★★★ 규칙 ★★★
 - 문제에 있는 숫자를 정확히 사용하세요
@@ -3914,14 +3964,12 @@ JSON으로만 응답하세요:
 - 검산(확인, 검증) 과정은 절대 포함하지 마세요
 
 ★★★ 정답 형식 ★★★
-- 정답은 반드시 정확한 값으로 표현하세요
+- 정답은 정수(예: "3", "12") 또는 분수(예: "1/2", "3/4")로 나올 것입니다
+- 정답을 정수 또는 분수 형태로 표현하세요
 - 근사값(소수점 근사)은 절대 사용하지 마세요
-- 정수, 분수, 루트(√) 등 정확한 수학적 표현을 사용하세요
-  예: "3", "1/2", "2√3", "1+√2", "3π/4"
-- 정답이 정수가 아니어도 전혀 문제없습니다!
 
 JSON으로만 응답하세요:
-{{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답 (정확한 값, 근사값 금지)"}}"""
+{{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답 (정수 또는 분수)"}}"""
 
         return gemini_generate_json(model, prompt, context="twin_step2_solve (text)")
 
@@ -4649,80 +4697,103 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
         is_mcq = step0.get('is_mcq', False)
         print(f"  {tag} has_graph={has_graph}, is_mcq={is_mcq}")
 
+        # === Retry loop: regenerate numbers + solve until answer is clean integer/fraction ===
+        MAX_CLEAN_ANSWER_RETRIES = 3
         new_diagram_data = None
         number_changes = {}
-
-        if has_graph:
-            # === DIAGRAM PATH ===
-            # Step 1: OCR original → decide number changes → generate new diagram
-            print(f"  {tag} Step 1: Analyzing + deciding changes + generating diagram...")
-            step1 = twin_step1_change_diagram(
-                api_key=api_key,
-                original_image_data=image_data,
-                mime_type=mime_type,
-                variation_index=variation_index,
-                num_total=num_total
-            )
-            new_diagram_data = step1.get('image_data')
-            number_changes = step1.get('number_changes', {})
-            if not new_diagram_data:
-                print(f"  {tag} Failed to generate new diagram")
-                return None
-            print(f"  {tag} New diagram: {len(new_diagram_data)} bytes")
-            print(f"  {tag} Number changes: {number_changes}")
-
-            # Step 2: Deterministic text substitution
-            print(f"  {tag} Step 2: Applying number changes to question text...")
-            step2 = twin_step2_question_from_diagram(
-                api_key=api_key,
-                step1_result=step1
-            )
-            latex_string = step2.get('new_question', '')
-        else:
-            # === NO DIAGRAM PATH ===
-            print(f"  {tag} Step 2.2: New question (no diagram)...")
-            step2 = twin_step2_question_no_diagram(
-                api_key=api_key,
-                image_data=image_data,
-                mime_type=mime_type,
-                variation_index=variation_index,
-                num_total=num_total
-            )
-            latex_string = step2.get('new_question', '')
-            number_changes = step2.get('number_changes', [])
-
-        print(f"  {tag} Question: {latex_string[:80]}...")
-
-        # === Step 3: Generate question image FIRST ===
-        # Generate image before solving so solver can look at it directly
-        generated_image_url = None
+        latex_string = ''
         generated_image_data = None
-        try:
-            if has_graph and new_diagram_data:
-                print(f"  {tag} Using diagram from step 1 as question image...")
-                generated_image_data = new_diagram_data
-            else:
-                print(f"  {tag} Generating question image...")
-                generated_image_data = generate_question_image(
-                    api_key=api_key,
-                    latex_string=latex_string,
-                    choices=None,
-                    graph_description=None,
-                    has_graph=False
-                )
-        except Exception as e:
-            print(f"  {tag} Warning: Question image generation failed: {e}")
+        generated_image_url = None
+        solution_text = ''
+        answer = ''
 
-        # === Step 4: Solve by looking at the generated image directly ===
-        print(f"  {tag} Step 4: Solving from generated image...")
-        step3 = twin_step3_solve(
-            api_key=api_key,
-            question_text=latex_string,
-            diagram_image_data=generated_image_data
-        )
-        solution_text = step3.get('solution', '')
-        answer = step3.get('answer', '')
-        print(f"  {tag} Answer: {answer}")
+        for clean_attempt in range(MAX_CLEAN_ANSWER_RETRIES):
+            if clean_attempt > 0:
+                print(f"  {tag} === Retry {clean_attempt+1}/{MAX_CLEAN_ANSWER_RETRIES}: answer was not clean integer/fraction, regenerating numbers... ===")
+
+            new_diagram_data = None
+            number_changes = {}
+
+            if has_graph:
+                # === DIAGRAM PATH ===
+                # Step 1: OCR original → decide number changes → generate new diagram
+                print(f"  {tag} Step 1: Analyzing + deciding changes + generating diagram...")
+                step1 = twin_step1_change_diagram(
+                    api_key=api_key,
+                    original_image_data=image_data,
+                    mime_type=mime_type,
+                    variation_index=variation_index,
+                    num_total=num_total
+                )
+                new_diagram_data = step1.get('image_data')
+                number_changes = step1.get('number_changes', {})
+                if not new_diagram_data:
+                    print(f"  {tag} Failed to generate new diagram")
+                    continue
+                print(f"  {tag} New diagram: {len(new_diagram_data)} bytes")
+                print(f"  {tag} Number changes: {number_changes}")
+
+                # Step 2: Deterministic text substitution
+                print(f"  {tag} Step 2: Applying number changes to question text...")
+                step2 = twin_step2_question_from_diagram(
+                    api_key=api_key,
+                    step1_result=step1
+                )
+                latex_string = step2.get('new_question', '')
+            else:
+                # === NO DIAGRAM PATH ===
+                print(f"  {tag} Step 2.2: New question (no diagram)...")
+                step2 = twin_step2_question_no_diagram(
+                    api_key=api_key,
+                    image_data=image_data,
+                    mime_type=mime_type,
+                    variation_index=variation_index,
+                    num_total=num_total
+                )
+                latex_string = step2.get('new_question', '')
+                number_changes = step2.get('number_changes', [])
+
+            print(f"  {tag} Question: {latex_string[:80]}...")
+
+            # === Step 3: Generate question image FIRST ===
+            # Generate image before solving so solver can look at it directly
+            generated_image_url = None
+            generated_image_data = None
+            try:
+                if has_graph and new_diagram_data:
+                    print(f"  {tag} Using diagram from step 1 as question image...")
+                    generated_image_data = new_diagram_data
+                else:
+                    print(f"  {tag} Generating question image...")
+                    generated_image_data = generate_question_image(
+                        api_key=api_key,
+                        latex_string=latex_string,
+                        choices=None,
+                        graph_description=None,
+                        has_graph=False
+                    )
+            except Exception as e:
+                print(f"  {tag} Warning: Question image generation failed: {e}")
+
+            # === Step 4: Solve by looking at the generated image directly ===
+            print(f"  {tag} Step 4: Solving from generated image...")
+            step3 = twin_step3_solve(
+                api_key=api_key,
+                question_text=latex_string,
+                diagram_image_data=generated_image_data
+            )
+            solution_text = step3.get('solution', '')
+            answer = step3.get('answer', '')
+            print(f"  {tag} Answer: {answer}")
+
+            # === Verify answer is clean integer or fraction ===
+            if is_clean_answer(answer):
+                print(f"  {tag} Answer '{answer}' is a clean integer/fraction. OK!")
+                break
+            else:
+                print(f"  {tag} Answer '{answer}' is NOT a clean integer/fraction (attempt {clean_attempt+1}/{MAX_CLEAN_ANSWER_RETRIES})")
+                if clean_attempt == MAX_CLEAN_ANSWER_RETRIES - 1:
+                    print(f"  {tag} WARNING: Using non-clean answer after {MAX_CLEAN_ANSWER_RETRIES} attempts")
 
         # === Step 5: Generate MCQ choices (if applicable) ===
         choices = []
