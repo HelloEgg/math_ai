@@ -4394,6 +4394,47 @@ def generate_math_twin():
             answer_number = step4.get('answer_number', 1)
             print(f"  Choices: {choices}, answer_number={answer_number}")
 
+        # === Step 6: Regenerate question image WITH choices ===
+        # If MCQ, regenerate the image to include the choice options
+        if is_mcq and choices and generated_image_data:
+            try:
+                print("Step 6: Regenerating question image with choices...")
+                from google import genai as genai_img
+                from google.genai import types as img_types
+
+                client = genai_img.Client(api_key=api_key)
+
+                choices_text = "\n".join(choices)
+                regen_prompt = f"""이 수학 문제 이미지를 그대로 유지하면서, 이미지 하단에 다음 선택지를 추가하세요.
+
+선택지:
+{choices_text}
+
+★★★ 규칙 ★★★
+- 원본 이미지의 문제 텍스트, 도형, 그래프, 숫자는 절대 변경하지 마세요
+- 이미지 하단에 선택지만 깔끔하게 추가하세요
+- 흰색 배경, 검은색 텍스트
+- 원본과 동일한 스타일"""
+
+                regen_response = client.models.generate_content(
+                    model="gemini-3-pro-image-preview",
+                    contents=[
+                        regen_prompt,
+                        img_types.Part.from_bytes(data=generated_image_data, mime_type="image/png")
+                    ],
+                    config=img_types.GenerateContentConfig(
+                        response_modalities=['Image']
+                    )
+                )
+
+                for part in regen_response.candidates[0].content.parts:
+                    if part.inline_data is not None:
+                        generated_image_data = ensure_white_background(part.inline_data.data)
+                        print(f"  Regenerated with choices: {len(generated_image_data)} bytes")
+                        break
+            except Exception as e:
+                print(f"  Warning: Failed to add choices to image: {e}")
+
         # === Save question image ===
         try:
             if generated_image_data:
@@ -4575,6 +4616,46 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
             choices = step4.get('choices', [])
             answer_number = step4.get('answer_number', 1)
             print(f"  {tag} Choices: {choices}")
+
+        # === Step 6: Regenerate question image WITH choices ===
+        if is_mcq and choices and generated_image_data:
+            try:
+                print(f"  {tag} Step 6: Regenerating question image with choices...")
+                from google import genai as genai_img
+                from google.genai import types as img_types
+
+                client = genai_img.Client(api_key=api_key)
+
+                choices_text = "\n".join(choices)
+                regen_prompt = f"""이 수학 문제 이미지를 그대로 유지하면서, 이미지 하단에 다음 선택지를 추가하세요.
+
+선택지:
+{choices_text}
+
+★★★ 규칙 ★★★
+- 원본 이미지의 문제 텍스트, 도형, 그래프, 숫자는 절대 변경하지 마세요
+- 이미지 하단에 선택지만 깔끔하게 추가하세요
+- 흰색 배경, 검은색 텍스트
+- 원본과 동일한 스타일"""
+
+                regen_response = client.models.generate_content(
+                    model="gemini-3-pro-image-preview",
+                    contents=[
+                        regen_prompt,
+                        img_types.Part.from_bytes(data=generated_image_data, mime_type="image/png")
+                    ],
+                    config=img_types.GenerateContentConfig(
+                        response_modalities=['Image']
+                    )
+                )
+
+                for part in regen_response.candidates[0].content.parts:
+                    if part.inline_data is not None:
+                        generated_image_data = ensure_white_background(part.inline_data.data)
+                        print(f"  {tag} Regenerated with choices: {len(generated_image_data)} bytes")
+                        break
+            except Exception as e:
+                print(f"  {tag} Warning: Failed to add choices to image: {e}")
 
         # === Save question image ===
         try:
