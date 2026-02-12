@@ -3746,10 +3746,10 @@ def twin_step2_solve(api_key, question_text, diagram_image_data=None):
 - 절대 다른 숫자를 사용하지 마세요
 - 단계별로 깔끔하게 풀이하세요
 - 최종 정답을 명확하게 제시하세요
-- 풀이 마지막에 검산을 포함하세요 (정답을 원래 식에 대입하여 확인)
+- 검산(확인, 검증) 과정은 절대 포함하지 마세요
 
 JSON으로만 응답하세요:
-{{"solution": "단계별 풀이 (LaTeX, 한국어, 검산 포함)", "answer": "최종 정답 (정확한 값)"}}"""
+{{"solution": "단계별 풀이 (LaTeX, 한국어, 검산 제외)", "answer": "최종 정답 (정확한 값)"}}"""
 
     # Build content parts: prompt + optional image
     content_parts = [prompt]
