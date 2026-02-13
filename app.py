@@ -3529,388 +3529,123 @@ def ensure_white_background(image_data):
         return image_data
 
 
-def twin_step0_check_diagram(api_key, image_data, mime_type):
+
+def twin_generate_new_problem(api_key, image_data, mime_type, variation_index=0, num_total=1):
     """
-    Step 0: Check if the image has a diagram/graph and if it's MCQ.
-    Returns: dict with has_graph, is_mcq
-    """
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-3-pro-preview')
-
-    prompt = """이 수학 문제 이미지를 보고 다음을 판단하세요:
-
-1. 이미지에 그래프, 도형, 그림이 있는가? (단순 텍스트/수식만 있으면 false)
-2. 객관식 문제인가? (①②③④⑤ 같은 선택지가 있으면 true)
-
-JSON으로만 응답하세요:
-{"has_graph": true, "is_mcq": true}"""
-
-    image_part = {"mime_type": mime_type, "data": base64.b64encode(image_data).decode('utf-8')}
-    return gemini_generate_json(model, [prompt, image_part], context="twin_step0_check_diagram")
-
-
-def twin_step1_change_numbers(api_key, image_data, mime_type, variation_index=0, num_total=1):
-    """
-    Step 1: Analyze original problem and change only the numbers.
-    Returns: dict with question, has_graph, is_mcq, number_changes
+    Step 1: Analyze original problem image and generate a new problem with changed numbers.
+    Returns: dict with new_question, is_mcq, has_graph
     """
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-3-pro-preview')
 
-    prompt = """이 수학 문제 이미지를 보고 다음을 판단하세요:
-
-1. 이미지에 그래프, 도형, 그림이 있는가? (단순 텍스트/수식만 있으면 false)
-2. 객관식 문제인가? (①②③④⑤ 같은 선택지가 있으면 true)
-
-JSON으로만 응답하세요:
-{"has_graph": true, "is_mcq": true}"""
-
-    image_part = {"mime_type": mime_type, "data": base64.b64encode(image_data).decode('utf-8')}
-    return gemini_generate_json(model, [prompt, image_part], context="twin_step1_change_numbers")
-
-
-def twin_step1_change_diagram(api_key, original_image_data, mime_type="image/png", variation_index=0, num_total=1):
-    """
-    Step 1 (diagram path): Decide number changes, then generate new diagram with those exact numbers.
-
-    Pipeline:
-      1a. OCR the original image → extract question text + all numbers in the diagram
-      1b. AI decides new numbers → returns structured mapping (e.g. {"18": "20", "14": "12"})
-      1c. Generate new diagram image with those exact numbers using gemini-3-pro-image-preview
-
-    Returns:
-        dict with:
-          - 'image_data': new diagram image bytes (or None if failed)
-          - 'number_changes': dict mapping old→new (e.g. {"18": "20", "14": "12"})
-          - 'original_question': original question text from OCR
-          - 'original_numbers': list of original numbers found
-    """
-    import google.generativeai as genai_lib
-    genai_lib.configure(api_key=api_key)
-    model = genai_lib.GenerativeModel('gemini-3-pro-preview')
-
-    # === 1a. OCR the original image: extract question text + all numbers ===
-    ocr_prompt = """이 수학 문제 이미지를 완전히 분석하세요.
-
-1. 문제 텍스트를 정확히 읽으세요 (선택지 ①②③④⑤ 제외)
-2. 도형/그래프/그림 안에 표시된 숫자를 모두 추출하세요 (길이, 각도, 좌표, 넓이 등)
-3. 문제 텍스트에 있는 숫자도 모두 추출하세요
-
-★ 숫자 옆 단위(m, cm, °, m² 등)는 제외하고 순수 숫자만 ★
-★ 문제 번호는 제외 ★
-
-JSON으로만 응답하세요:
-{
-    "question_text": "문제 전체 텍스트 (선택지 제외, LaTeX/한국어)",
-    "diagram_numbers": ["18", "14"],
-    "text_numbers": ["208"]
-}
-
-diagram_numbers: 도형/그래프/그림 안에 적힌 숫자들 (순수 숫자)
-text_numbers: 문제 텍스트에만 있는 숫자들 (순수 숫자)"""
-
-    image_part = {"mime_type": mime_type, "data": base64.b64encode(original_image_data).decode('utf-8')}
-    ocr_result = gemini_generate_json(model, [ocr_prompt, image_part], context="twin_step1_change_diagram OCR")
-
-    original_question = ocr_result.get('question_text', '')
-    diagram_numbers = ocr_result.get('diagram_numbers', [])
-    text_numbers = ocr_result.get('text_numbers', [])
-    all_numbers = diagram_numbers + text_numbers
-    print(f"  Step 1a OCR: question={original_question[:80]}...")
-    print(f"  Step 1a OCR: diagram_numbers={diagram_numbers}, text_numbers={text_numbers}")
-
-    # === 1b. Reverse-engineer numbers: pick answer first, then compute parameters ===
     variation_hint = ""
     if num_total > 1:
-        hints = {
-            0: "정답을 원본보다 약간 작은 정수로 설정하세요",
-            1: "정답을 원본보다 약간 큰 정수로 설정하세요",
-            2: "정답을 원본보다 크게 다른 정수로 설정하세요",
-            3: "정답을 원본과 많이 다른 정수로 설정하세요",
-        }
-        hint = hints.get(variation_index, f"변형 {variation_index+1}에 맞는 고유한 정답을 사용하세요")
-        variation_hint = f"\n★ 변형 {variation_index+1}/{num_total}: {hint}"
+        variation_hint = f"\n★ 변형 {variation_index + 1}/{num_total}: 다른 변형들과 겹치지 않는 고유한 숫자를 사용하세요."
 
-    change_prompt = f"""이 문제의 숫자를 변형해서, 새로운 문제로 만들어줘.
+    prompt = f"""이 문제의 숫자를 변형해서, 새로운 문제로 만들어줘.
 정답이 정수로 떨어지도록 해줘.
-
-원본 문제 텍스트:
-{original_question}
-
-도형/그래프 안 숫자: {diagram_numbers}
-문제 텍스트 숫자: {text_numbers}
 {variation_hint}
 
 ★ 규칙:
 - 문제의 구조(도형, 조건, 수식 형태)는 절대 바꾸지 마세요
 - 숫자만 바꾸세요
-- 바꾼 숫자로 풀었을 때 정답이 반드시 정수가 되어야 합니다
-
-JSON으로만 응답하세요:
-{{"number_changes": {{"18": "20", "14": "12", "208": "192"}}}}
-
-number_changes: 원본숫자(key) → 새숫자(value) 매핑"""
-
-    change_result = gemini_generate_json(model, change_prompt, context="twin_step1_change_diagram number changes")
-    number_changes = change_result.get('number_changes', {})
-    print(f"  Step 1b: Decided number changes: {number_changes}")
-
-    if not number_changes:
-        print("  Step 1b: No number changes decided, aborting")
-        return {
-            'image_data': None,
-            'number_changes': {},
-            'original_question': original_question,
-            'original_numbers': all_numbers
-        }
-
-    # === 1c. Generate new diagram image with those exact numbers ===
-    try:
-        from google import genai
-        from google.genai import types
-
-        client = genai.Client(api_key=api_key)
-
-        changes_text = "\n".join(f"  - {old} → {new}" for old, new in number_changes.items())
-
-        gen_prompt = f"""이 수학 문제 이미지에서 아래 숫자들만 정확히 변경하여 새 이미지를 생성하세요.
-
-★★★ 변경할 숫자 (반드시 이 숫자만 사용하세요) ★★★
-{changes_text}
-
-★★★ 절대 규칙 ★★★
-1. 위에 명시된 숫자 변경만 적용하세요 - 다른 숫자로 바꾸지 마세요
-2. 그래프, 도형, 그림의 형태와 구조는 원본과 완전히 동일하게 유지
-3. 점의 위치, 선의 연결, 도형의 모양은 절대 바꾸지 않음
-4. 변수명, 점 이름(A, B, C, D, O 등)은 원본 그대로
-5. 문제 텍스트의 구조도 원본과 동일하게 유지하고 위 숫자만 변경
-6. 선택지(①②③④⑤)가 있다면 선택지는 제거하세요 (나중에 새로 만듭니다)
-7. 흰색 배경 (#FFFFFF), 검은색 텍스트와 선
-8. 원본과 동일한 레이아웃과 스타일
-
-★ 반드시 위 변경 목록의 새 숫자를 정확히 사용하세요 ★"""
-
-        gen_response = client.models.generate_content(
-            model="gemini-3-pro-image-preview",
-            contents=[
-                gen_prompt,
-                types.Part.from_bytes(data=original_image_data, mime_type="image/png")
-            ],
-            config=types.GenerateContentConfig(
-                response_modalities=['Image']
-            )
-        )
-
-        new_image_data = None
-        for part in gen_response.candidates[0].content.parts:
-            if part.inline_data is not None:
-                new_image_data = ensure_white_background(part.inline_data.data)
-                print(f"  Step 1c: Generated new diagram: {len(new_image_data)} bytes")
-                break
-
-        if not new_image_data:
-            print("  Step 1c: No image in Gemini response")
-
-        return {
-            'image_data': new_image_data,
-            'number_changes': number_changes,
-            'original_question': original_question,
-            'original_numbers': all_numbers
-        }
-
-    except Exception as e:
-        print(f"  Step 1c: Diagram generation failed: {e}")
-        return {
-            'image_data': None,
-            'number_changes': number_changes,
-            'original_question': original_question,
-            'original_numbers': all_numbers
-        }
-
-
-def twin_step2_question_from_diagram(api_key, step1_result):
-    """
-    Step 2 (diagram path): Replace numbers in question text using the known number_changes from step 1.
-
-    This is a deterministic substitution - we know exactly which numbers changed
-    because step 1 decided them. No OCR needed.
-
-    Args:
-        api_key: Gemini API key
-        step1_result: dict from twin_step1_change_diagram containing:
-            - original_question: original question text
-            - number_changes: dict mapping old→new numbers
-
-    Returns:
-        dict with 'new_question' and 'number_changes'
-    """
-    original_question = step1_result.get('original_question', '')
-    number_changes = step1_result.get('number_changes', {})
-
-    if not number_changes or not original_question:
-        return {'new_question': original_question, 'number_changes': number_changes}
-
-    # Deterministic replacement: replace old numbers with new numbers in question text
-    # Sort by length descending to avoid partial replacements (e.g. "18" before "1")
-    new_question = original_question
-    for old_num, new_num in sorted(number_changes.items(), key=lambda x: len(x[0]), reverse=True):
-        new_question = new_question.replace(old_num, new_num)
-
-    print(f"  Step 2: Original question: {original_question[:100]}...")
-    print(f"  Step 2: New question:      {new_question[:100]}...")
-    print(f"  Step 2: Changes applied:   {number_changes}")
-
-    return {
-        'new_question': new_question,
-        'number_changes': number_changes
-    }
-
-
-def twin_step2_question_no_diagram(api_key, image_data, mime_type, variation_index=0, num_total=1):
-    """
-    Step 2.2 (no diagram): Read the original question and generate a new question with only numbers changed.
-    Returns: dict with new_question
-    """
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-3-pro-preview')
-
-    variation_hint = ""
-    if num_total > 1:
-        variation_hint = f"""
-★ 변형 {variation_index + 1}/{num_total}: 다른 변형들과 겹치지 않는 숫자를 사용하세요.
-변형마다 숫자를 다르게: 1=약간 줄임, 2=약간 늘림, 3=크게 줄임, 4=크게 늘림."""
-
-    prompt = f"""이 수학 문제 이미지의 숫자를 변형해서, 새로운 문제로 만들어줘.
-정답이 정수로 떨어지도록 해줘.
-{variation_hint}
-
-★ 규칙:
-- 문제의 구조(도형, 조건, 수식 형태, 변수명, 함수 종류)는 절대 바꾸지 마세요
-- 숫자만 바꾸세요
-- 바꾼 숫자로 풀었을 때 정답이 반드시 정수가 되어야 합니다
-
-이미지에 그래프/도형/그림이 있는지 확인하세요.
-번호가 매겨진 선택지(객관식)가 있는지 확인하세요.
 
 JSON으로만 응답하세요:
 {{
-    "original_question": "원본 문제 전체 텍스트",
     "new_question": "숫자만 바꾼 새 문제 전체 텍스트 (LaTeX, 한국어)",
-    "has_graph": true,
     "is_mcq": true,
-    "number_changes": ["18m → 20m", "14m → 12m", "216m² → 192m²"]
+    "has_graph": true
 }}
 
-number_changes: 원본→새숫자 형식. 이미지 안의 숫자 변경사항."""
+is_mcq: 객관식이면 true (①②③④⑤ 선택지가 있으면)
+has_graph: 그래프/도형/그림이 있으면 true"""
 
     image_part = {"mime_type": mime_type, "data": base64.b64encode(image_data).decode('utf-8')}
-    return gemini_generate_json(model, [prompt, image_part], context="twin_step2_question_no_diagram")
+    return gemini_generate_json(model, [prompt, image_part], context="twin_generate_new_problem")
 
 
-def twin_step2_solve(api_key, question_text, diagram_image_data=None):
+def twin_modify_image(api_key, original_image_data, mime_type, new_question_text):
     """
-    Step 3: Solve the new problem by looking at the generated question image directly.
+    Step 2: Modify the original image to reflect the new numbers.
+    Returns: image bytes (PNG) or None if failed.
+    """
+    from google import genai as genai_client
+    from google.genai import types
 
-    When a diagram image is provided, the AI solves primarily from the image,
-    reading the numbers directly from the diagram to avoid any text mismatch.
+    client = genai_client.Client(api_key=api_key)
 
-    Args:
-        api_key: Gemini API key
-        question_text: The new question text (used as fallback if no image)
-        diagram_image_data: (optional) The generated question image bytes.
-                           If provided, AI solves by reading this image directly.
+    prompt = f"""아래 문제에 맞게 이미지 도형의 숫자를 변형해줘.
+다른건 절대 건드리지 말고 숫자만 변형 시켜줘.
+결과물은 png 형식이어야 해.
 
+{new_question_text}"""
+
+    response = client.models.generate_content(
+        model="gemini-3-pro-image-preview",
+        contents=[
+            prompt,
+            types.Part.from_bytes(data=original_image_data, mime_type=mime_type)
+        ],
+        config=types.GenerateContentConfig(
+            response_modalities=['Image']
+        )
+    )
+
+    for part in response.candidates[0].content.parts:
+        if part.inline_data is not None:
+            return ensure_white_background(part.inline_data.data)
+
+    return None
+
+
+def twin_solve(api_key, question_text, question_image_data=None):
+    """
+    Step 3: Solve the new problem.
     Returns: dict with solution, answer
     """
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-3-pro-preview')
 
-    if diagram_image_data:
-        # === PRIMARY: Solve by looking at the generated image directly ===
+    if question_image_data:
         prompt = """이 수학 문제 이미지를 직접 보고 풀어주세요.
 
-★★★ 절대 금지 사항 ★★★
-- 이미지에 보이는 문제의 구조, 도형, 숫자를 절대 변경하지 마세요
-- 이미지에 세로 길 2개가 보이면 반드시 세로 길 2개로 풀어야 합니다
-- 이미지에 가로 길 3개가 보이면 반드시 가로 길 3개로 풀어야 합니다
-- "깔끔한 정수가 안 나온다"는 이유로 문제 구조를 바꾸는 것은 절대 금지입니다
-- 정답이 분수, 루트, 소수여도 괜찮습니다. 이미지 그대로 푸세요
-- 문제를 단순화하거나 재해석하지 마세요
+★ 절대 금지: 이미지에 보이는 문제의 구조, 도형, 숫자를 변경하지 마세요. 이미지 그대로 푸세요.
 
-★★★ 1단계: 이미지 정밀 분석 (반드시 먼저 수행) ★★★
-풀이를 시작하기 전에, 이미지를 꼼꼼히 분석하여 다음을 정확히 파악하세요:
-- 도형의 전체 구조 (직사각형, 삼각형, 원 등)
-- 도형 안에 그려진 모든 선, 경로, 구역을 하나하나 세세요
-- 각 변의 길이, 각도 등 모든 숫자를 정확히 읽으세요
-- 같은 길이/폭이 여러 번 나타나는 경우 정확히 몇 번인지 세세요
-  예: 세로 방향 길 2개 → 폭 x가 2번 = 2x (절대 1개로 줄이지 마세요!)
-  예: 가로 방향 길 3개 → 폭 x가 3번 = 3x (절대 2개로 줄이지 마세요!)
-- 넓이를 구할 때: 전체 넓이에서 빼야 할 부분을 정확히 파악하세요
-- ★ 분석 결과를 solution 앞부분에 명시하세요 (예: "세로 길 2개, 가로 길 1개 확인")
-
-★★★ 2단계: 수식 세우기 ★★★
-- 1단계에서 파악한 구조를 바탕으로 수식을 세우세요
-- 이미지에 보이는 것과 정확히 일치하는 수식이어야 합니다
-- 선이나 경로가 여러 개면, 반드시 그 개수만큼 곱하세요
-- 수식을 세운 후, 이미지의 구조(선 개수, 숫자)와 수식이 일치하는지 재확인하세요
-
-★★★ 3단계: 풀이 ★★★
+풀이 규칙:
+- 이미지의 도형/숫자를 정확히 읽고 그대로 사용하세요
 - 단계별로 깔끔하게 풀이하세요
-- 검산(확인, 검증) 과정은 포함하지 마세요
-
-★★★ 정답 형식 ★★★
-- 정답은 반드시 정확한 값으로 표현하세요
-- 근사값(소수점 근사)은 절대 사용하지 마세요
-- 정수, 분수, 루트(√) 등 정확한 수학적 표현을 사용하세요
-  예: "3", "1/2", "2√3", "1+√2", "3π/4"
-- 정답이 정수가 아니어도 전혀 문제없습니다!
+- 검산 과정은 포함하지 마세요
 
 JSON으로만 응답하세요:
-{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답 (정확한 값, 근사값 금지)"}"""
+{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답"}"""
 
         image_part = {
             "mime_type": "image/png",
-            "data": base64.b64encode(diagram_image_data).decode('utf-8')
+            "data": base64.b64encode(question_image_data).decode('utf-8')
         }
-        return gemini_generate_json(model, [prompt, image_part], context="twin_step2_solve (image)")
+        return gemini_generate_json(model, [prompt, image_part], context="twin_solve (image)")
     else:
-        # === FALLBACK: Solve from text only ===
-        prompt = f"""다음 수학 문제를 처음부터 단계별로 풀어보세요.
+        prompt = f"""다음 수학 문제를 풀어주세요.
 
 문제:
 {question_text}
 
-★★★ 절대 금지 사항 ★★★
-- 문제의 구조, 조건, 숫자를 절대 변경하지 마세요
-- 문제에 주어진 그대로 풀어야 합니다
-- "깔끔한 정수가 안 나온다"는 이유로 문제를 바꾸는 것은 절대 금지입니다
-- 정답이 분수, 루트, 소수여도 괜찮습니다
+★ 절대 금지: 문제의 구조, 조건, 숫자를 변경하지 마세요. 주어진 그대로 푸세요.
 
-★★★ 규칙 ★★★
+풀이 규칙:
 - 문제에 있는 숫자를 정확히 사용하세요
 - 단계별로 깔끔하게 풀이하세요
-- 검산(확인, 검증) 과정은 절대 포함하지 마세요
-
-★★★ 정답 형식 ★★★
-- 정답은 반드시 정확한 값으로 표현하세요
-- 근사값(소수점 근사)은 절대 사용하지 마세요
-- 정수, 분수, 루트(√) 등 정확한 수학적 표현을 사용하세요
-  예: "3", "1/2", "2√3", "1+√2", "3π/4"
-- 정답이 정수가 아니어도 전혀 문제없습니다!
+- 검산 과정은 포함하지 마세요
 
 JSON으로만 응답하세요:
-{{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답 (정확한 값, 근사값 금지)"}}"""
+{{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답"}}"""
 
-        return gemini_generate_json(model, prompt, context="twin_step2_solve (text)")
-
-
-# Alias: twin_step3_solve maps to twin_step2_solve (solving step)
-twin_step3_solve = twin_step2_solve
+        return gemini_generate_json(model, prompt, context="twin_solve (text)")
 
 
-def twin_step4_choices(api_key, question_text, answer):
+def twin_generate_choices(api_key, question_text, answer):
     """
-    Step 4: Generate MCQ choices that include the correct answer.
+    Step 4 (MCQ only): Generate 5 MCQ choices including the correct answer.
     Returns: dict with choices, answer_number
     """
     genai.configure(api_key=api_key)
@@ -3918,20 +3653,13 @@ def twin_step4_choices(api_key, question_text, answer):
 
     prompt = f"""다음 수학 문제의 정답을 포함한 객관식 선택지 5개를 만들어주세요.
 
-문제:
-{question_text}
-
+문제: {question_text}
 정답: {answer}
 
-★★★ 규칙 ★★★
-- 정답이 반드시 5개 선택지 중 하나로 포함되어야 합니다
-- 나머지 4개는 정답과 형태가 같지만 값이 다른 오답 유인 선택지
-- 선택지의 형태를 정답과 일치시키세요:
-  · 정답이 정수면 → 나머지도 정수 (예: 3, 5, 7, 9, 11)
-  · 정답이 분수면 → 나머지도 분수 (예: 1/3, 2/3, 4/3, 5/3, 7/3)
-  · 정답이 루트 포함이면 → 나머지도 같은 형태 (예: 1+√2, 2+√2, 3+√2, 1+√3, 2+√3)
-  · 정답이 π 포함이면 → 나머지도 π 포함 (예: 2π, 3π, 4π, 5π, 6π)
-- 선택지는 오름차순으로 정렬
+규칙:
+- 정답이 반드시 5개 선택지 중 하나로 포함
+- 나머지 4개는 그럴듯한 오답
+- 선택지는 오름차순 정렬
 - ①②③④⑤ 기호 사용
 
 JSON으로만 응답하세요:
@@ -3939,8 +3667,7 @@ JSON으로만 응답하세요:
 
 answer_number는 정답이 들어있는 선택지 번호 (1~5)"""
 
-    return gemini_generate_json(model, prompt, context="twin_step4_choices")
-
+    return gemini_generate_json(model, prompt, context="twin_generate_choices")
 
 def generate_solution_image(api_key, solution_text):
     """
@@ -4400,64 +4127,41 @@ def generate_math_twin():
     try:
         api_key = app.config['GEMINI_API_KEY']
 
-        # === Step 0: Check if diagram exists and if MCQ ===
-        print("Step 0: Checking for diagram and MCQ...")
-        step0 = twin_step0_check_diagram(api_key=api_key, image_data=image_data, mime_type=mime_type)
-        has_graph = step0.get('has_graph', False)
-        is_mcq = step0.get('is_mcq', False)
+        # === Step 1: Generate new problem (change numbers) ===
+        print("Step 1: Generating new problem...")
+        step1 = twin_generate_new_problem(
+            api_key=api_key,
+            image_data=image_data,
+            mime_type=mime_type
+        )
+        latex_string = step1.get('new_question', '')
+        is_mcq = step1.get('is_mcq', False)
+        has_graph = step1.get('has_graph', False)
         print(f"  has_graph={has_graph}, is_mcq={is_mcq}")
+        print(f"  Question: {latex_string[:100]}...")
 
-        new_diagram_data = None
-        number_changes = {}
+        # === Step 2: Modify image ===
+        generated_image_data = None
+        generated_image_uuid = None
 
         if has_graph:
-            # === DIAGRAM PATH ===
-            # Step 1: OCR original → decide number changes → generate new diagram
-            print("Step 1: Analyzing original + deciding number changes + generating new diagram...")
-            step1 = twin_step1_change_diagram(
-                api_key=api_key,
-                original_image_data=image_data,
-                mime_type=mime_type
-            )
-            new_diagram_data = step1.get('image_data')
-            number_changes = step1.get('number_changes', {})
-            if not new_diagram_data:
-                return jsonify({'error': 'Failed to generate new diagram'}), 500
-            print(f"  New diagram generated: {len(new_diagram_data)} bytes")
-            print(f"  Number changes: {number_changes}")
-
-            # Step 2: Deterministic text substitution using known changes
-            print("Step 2: Applying number changes to question text...")
-            step2 = twin_step2_question_from_diagram(
-                api_key=api_key,
-                step1_result=step1
-            )
-            latex_string = step2.get('new_question', '')
-            print(f"  New question: {latex_string[:100]}...")
+            print("Step 2: Modifying image with new numbers...")
+            try:
+                generated_image_data = twin_modify_image(
+                    api_key=api_key,
+                    original_image_data=image_data,
+                    mime_type=mime_type,
+                    new_question_text=latex_string
+                )
+                if generated_image_data:
+                    print(f"  Modified image: {len(generated_image_data)} bytes")
+                else:
+                    print("  Image modification returned no data")
+            except Exception as e:
+                print(f"  Warning: Image modification failed: {e}")
         else:
-            # === NO DIAGRAM PATH ===
-            print("Step 2.2: Generating new question (no diagram)...")
-            step2 = twin_step2_question_no_diagram(
-                api_key=api_key,
-                image_data=image_data,
-                mime_type=mime_type
-            )
-            latex_string = step2.get('new_question', '')
-            number_changes = step2.get('number_changes', [])
-            print(f"  Question: {latex_string[:100]}...")
-
-        # === Step 3: Generate question image FIRST ===
-        # For diagram path: use the diagram already generated in step 1
-        # For no-diagram path: generate a new text-only image
-        # We generate the image BEFORE solving so the solver can look at it directly
-        generated_image_uuid = None
-        generated_image_data = None
-        try:
-            if has_graph and new_diagram_data:
-                print("Using diagram from step 1 as question image...")
-                generated_image_data = new_diagram_data
-            else:
-                print(f"Generating question image (is_mcq={is_mcq})...")
+            print("Step 2: Generating question image from text...")
+            try:
                 generated_image_data = generate_question_image(
                     api_key=api_key,
                     latex_string=latex_string,
@@ -4465,70 +4169,29 @@ def generate_math_twin():
                     graph_description=None,
                     has_graph=False
                 )
-        except Exception as e:
-            print(f"Warning: Question image generation failed: {e}")
+            except Exception as e:
+                print(f"  Warning: Question image generation failed: {e}")
 
-        # === Step 4: Solve by looking at the generated image directly ===
-        print("Step 4: Solving by looking at generated question image...")
-        step3 = twin_step3_solve(
+        # === Step 3: Solve ===
+        print("Step 3: Solving...")
+        step3 = twin_solve(
             api_key=api_key,
             question_text=latex_string,
-            diagram_image_data=generated_image_data
+            question_image_data=generated_image_data
         )
         solution_text = step3.get('solution', '')
         answer = step3.get('answer', '')
         print(f"  Answer: {answer}")
 
-        # === Step 5: Generate MCQ choices (if applicable) ===
+        # === Step 4: Generate MCQ choices (if applicable) ===
         choices = []
         answer_number = 1
         if is_mcq:
-            print("Step 5: Generating MCQ choices...")
-            step4 = twin_step4_choices(api_key=api_key, question_text=latex_string, answer=answer)
+            print("Step 4: Generating MCQ choices...")
+            step4 = twin_generate_choices(api_key=api_key, question_text=latex_string, answer=answer)
             choices = step4.get('choices', [])
             answer_number = step4.get('answer_number', 1)
             print(f"  Choices: {choices}, answer_number={answer_number}")
-
-        # === Step 6: Regenerate question image WITH choices ===
-        # If MCQ, regenerate the image to include the choice options
-        if is_mcq and choices and generated_image_data:
-            try:
-                print("Step 6: Regenerating question image with choices...")
-                from google import genai as genai_img
-                from google.genai import types as img_types
-
-                client = genai_img.Client(api_key=api_key)
-
-                choices_text = "\n".join(choices)
-                regen_prompt = f"""이 수학 문제 이미지를 그대로 유지하면서, 이미지 하단에 다음 선택지를 추가하세요.
-
-선택지:
-{choices_text}
-
-★★★ 규칙 ★★★
-- 원본 이미지의 문제 텍스트, 도형, 그래프, 숫자는 절대 변경하지 마세요
-- 이미지 하단에 선택지만 깔끔하게 추가하세요
-- 흰색 배경, 검은색 텍스트
-- 원본과 동일한 스타일"""
-
-                regen_response = client.models.generate_content(
-                    model="gemini-3-pro-image-preview",
-                    contents=[
-                        regen_prompt,
-                        img_types.Part.from_bytes(data=generated_image_data, mime_type="image/png")
-                    ],
-                    config=img_types.GenerateContentConfig(
-                        response_modalities=['Image']
-                    )
-                )
-
-                for part in regen_response.candidates[0].content.parts:
-                    if part.inline_data is not None:
-                        generated_image_data = ensure_white_background(part.inline_data.data)
-                        print(f"  Regenerated with choices: {len(generated_image_data)} bytes")
-                        break
-            except Exception as e:
-                print(f"  Warning: Failed to add choices to image: {e}")
 
         # === Save question image ===
         try:
@@ -4571,7 +4234,6 @@ def generate_math_twin():
             'is_mcq': is_mcq,
             'choices': choices,
             'has_graph': has_graph,
-            'number_changes': number_changes if has_graph else None,
             'modified_image_id': generated_image_uuid,
             'modified_image_url': f"/math_twin/images/{generated_image_uuid}" if generated_image_uuid else None,
             'solution_image_id': solution_image_uuid,
@@ -4605,10 +4267,17 @@ def download_image_from_url(url):
         return None
 
 
+
 def generate_single_twin(api_key, image_data, original_url, base_url, variation_index=0, num_total=1):
     """
-    Generate a single twin question from image data using 4-step sequential approach.
-    variation_index and num_total are used to ensure each twin uses different numbers.
+    Generate a single twin question from image data.
+
+    Pipeline:
+      1. Generate new problem (change numbers) using gemini-3-pro-preview
+      2. Modify image (change numbers in diagram) using gemini-3-pro-image-preview
+      3. Solve the new problem
+      4. If MCQ, generate choices
+
     Returns formatted response dict or None if failed.
     """
     try:
@@ -4620,67 +4289,43 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
 
         tag = f"[Twin {variation_index+1}/{num_total}]"
 
-        # === Step 0: Check if diagram exists and if MCQ ===
-        print(f"  {tag} Step 0: Checking diagram/MCQ...")
-        step0 = twin_step0_check_diagram(api_key=api_key, image_data=image_data, mime_type=mime_type)
-        has_graph = step0.get('has_graph', False)
-        is_mcq = step0.get('is_mcq', False)
+        # === Step 1: Generate new problem (change numbers) ===
+        print(f"  {tag} Step 1: Generating new problem...")
+        step1 = twin_generate_new_problem(
+            api_key=api_key,
+            image_data=image_data,
+            mime_type=mime_type,
+            variation_index=variation_index,
+            num_total=num_total
+        )
+        latex_string = step1.get('new_question', '')
+        is_mcq = step1.get('is_mcq', False)
+        has_graph = step1.get('has_graph', False)
         print(f"  {tag} has_graph={has_graph}, is_mcq={is_mcq}")
-
-        new_diagram_data = None
-        number_changes = {}
-
-        if has_graph:
-            # === DIAGRAM PATH ===
-            # Step 1: OCR original → decide number changes → generate new diagram
-            print(f"  {tag} Step 1: Analyzing + deciding changes + generating diagram...")
-            step1 = twin_step1_change_diagram(
-                api_key=api_key,
-                original_image_data=image_data,
-                mime_type=mime_type,
-                variation_index=variation_index,
-                num_total=num_total
-            )
-            new_diagram_data = step1.get('image_data')
-            number_changes = step1.get('number_changes', {})
-            if not new_diagram_data:
-                print(f"  {tag} Failed to generate new diagram")
-                return None
-            print(f"  {tag} New diagram: {len(new_diagram_data)} bytes")
-            print(f"  {tag} Number changes: {number_changes}")
-
-            # Step 2: Deterministic text substitution
-            print(f"  {tag} Step 2: Applying number changes to question text...")
-            step2 = twin_step2_question_from_diagram(
-                api_key=api_key,
-                step1_result=step1
-            )
-            latex_string = step2.get('new_question', '')
-        else:
-            # === NO DIAGRAM PATH ===
-            print(f"  {tag} Step 2.2: New question (no diagram)...")
-            step2 = twin_step2_question_no_diagram(
-                api_key=api_key,
-                image_data=image_data,
-                mime_type=mime_type,
-                variation_index=variation_index,
-                num_total=num_total
-            )
-            latex_string = step2.get('new_question', '')
-            number_changes = step2.get('number_changes', [])
-
         print(f"  {tag} Question: {latex_string[:80]}...")
 
-        # === Step 3: Generate question image FIRST ===
-        # Generate image before solving so solver can look at it directly
-        generated_image_url = None
+        # === Step 2: Modify image ===
         generated_image_data = None
-        try:
-            if has_graph and new_diagram_data:
-                print(f"  {tag} Using diagram from step 1 as question image...")
-                generated_image_data = new_diagram_data
-            else:
-                print(f"  {tag} Generating question image...")
+        generated_image_url = None
+
+        if has_graph:
+            print(f"  {tag} Step 2: Modifying image with new numbers...")
+            try:
+                generated_image_data = twin_modify_image(
+                    api_key=api_key,
+                    original_image_data=image_data,
+                    mime_type=mime_type,
+                    new_question_text=latex_string
+                )
+                if generated_image_data:
+                    print(f"  {tag} Modified image: {len(generated_image_data)} bytes")
+                else:
+                    print(f"  {tag} Image modification returned no data")
+            except Exception as e:
+                print(f"  {tag} Warning: Image modification failed: {e}")
+        else:
+            print(f"  {tag} Step 2: Generating question image from text...")
+            try:
                 generated_image_data = generate_question_image(
                     api_key=api_key,
                     latex_string=latex_string,
@@ -4688,69 +4333,29 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                     graph_description=None,
                     has_graph=False
                 )
-        except Exception as e:
-            print(f"  {tag} Warning: Question image generation failed: {e}")
+            except Exception as e:
+                print(f"  {tag} Warning: Question image generation failed: {e}")
 
-        # === Step 4: Solve by looking at the generated image directly ===
-        print(f"  {tag} Step 4: Solving from generated image...")
-        step3 = twin_step3_solve(
+        # === Step 3: Solve the new problem ===
+        print(f"  {tag} Step 3: Solving...")
+        step3 = twin_solve(
             api_key=api_key,
             question_text=latex_string,
-            diagram_image_data=generated_image_data
+            question_image_data=generated_image_data
         )
         solution_text = step3.get('solution', '')
         answer = step3.get('answer', '')
         print(f"  {tag} Answer: {answer}")
 
-        # === Step 5: Generate MCQ choices (if applicable) ===
+        # === Step 4: Generate MCQ choices (if applicable) ===
         choices = []
         answer_number = 1
         if is_mcq:
-            print(f"  {tag} Step 5: Generating choices...")
-            step4 = twin_step4_choices(api_key=api_key, question_text=latex_string, answer=answer)
+            print(f"  {tag} Step 4: Generating choices...")
+            step4 = twin_generate_choices(api_key=api_key, question_text=latex_string, answer=answer)
             choices = step4.get('choices', [])
             answer_number = step4.get('answer_number', 1)
             print(f"  {tag} Choices: {choices}")
-
-        # === Step 6: Regenerate question image WITH choices ===
-        if is_mcq and choices and generated_image_data:
-            try:
-                print(f"  {tag} Step 6: Regenerating question image with choices...")
-                from google import genai as genai_img
-                from google.genai import types as img_types
-
-                client = genai_img.Client(api_key=api_key)
-
-                choices_text = "\n".join(choices)
-                regen_prompt = f"""이 수학 문제 이미지를 그대로 유지하면서, 이미지 하단에 다음 선택지를 추가하세요.
-
-선택지:
-{choices_text}
-
-★★★ 규칙 ★★★
-- 원본 이미지의 문제 텍스트, 도형, 그래프, 숫자는 절대 변경하지 마세요
-- 이미지 하단에 선택지만 깔끔하게 추가하세요
-- 흰색 배경, 검은색 텍스트
-- 원본과 동일한 스타일"""
-
-                regen_response = client.models.generate_content(
-                    model="gemini-3-pro-image-preview",
-                    contents=[
-                        regen_prompt,
-                        img_types.Part.from_bytes(data=generated_image_data, mime_type="image/png")
-                    ],
-                    config=img_types.GenerateContentConfig(
-                        response_modalities=['Image']
-                    )
-                )
-
-                for part in regen_response.candidates[0].content.parts:
-                    if part.inline_data is not None:
-                        generated_image_data = ensure_white_background(part.inline_data.data)
-                        print(f"  {tag} Regenerated with choices: {len(generated_image_data)} bytes")
-                        break
-            except Exception as e:
-                print(f"  {tag} Warning: Failed to add choices to image: {e}")
 
         # === Save question image ===
         try:
@@ -4770,7 +4375,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
         solution_image_url = None
         try:
             if solution_text:
-                print(f"  [Twin {variation_index+1}] Generating solution image...")
+                print(f"  {tag} Generating solution image...")
                 solution_image_data = generate_solution_image(
                     api_key=api_key,
                     solution_text=solution_text
@@ -4781,11 +4386,11 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
                     with open(solution_image_path, 'wb') as f:
                         f.write(solution_image_data)
                     solution_image_url = f"{base_url}/math_twin/images/{solution_image_uuid}"
-                    print(f"  [Twin {variation_index+1}] Saved solution image: {solution_image_uuid}")
+                    print(f"  {tag} Saved solution image: {solution_image_uuid}")
                 else:
-                    print(f"  [Twin {variation_index+1}] Solution image generation returned no data")
+                    print(f"  {tag} Solution image generation returned no data")
         except Exception as e:
-            print(f"  [Twin {variation_index+1}] Warning: Solution image generation failed: {e}")
+            print(f"  {tag} Warning: Solution image generation failed: {e}")
 
         return {
             "latexString": latex_string,
@@ -4801,7 +4406,6 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
     except Exception as e:
         print(f"Error generating twin: {e}")
         return None
-
 
 @app.route('/math_twin/batch', methods=['POST'])
 def generate_math_twin_batch():
