@@ -3696,13 +3696,14 @@ def generate_solution_image(api_key, solution_text):
 스타일 요구사항:
 - 흰색 배경 (순수 흰색, #FFFFFF)
 - 검은색 텍스트
-- 명확하고 읽기 쉬운 글꼴
+- 명확하고 읽기 쉬운 큰 글꼴 (기본 크기보다 30% 더 크게)
 - 깔끔하고 심플한 교과서 스타일
 - 수학적 정밀성
 - 추가 장식이나 색상 없음
 - 한국어 텍스트 사용
 - LaTeX 수식은 올바르게 렌더링
-- 단계별로 깔끔하게 정리"""
+- 단계별로 깔끔하게 정리
+- 글자가 충분히 크고 선명해야 함"""
 
         response = client.models.generate_content(
             model="gemini-3-pro-image-preview",
