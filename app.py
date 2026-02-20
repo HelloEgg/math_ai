@@ -3536,7 +3536,7 @@ def twin_generate_new_problem(api_key, image_data, mime_type, variation_index=0,
     Returns: dict with new_question, is_mcq, has_graph
     """
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-3-pro-preview')
+    model = genai.GenerativeModel('gemini-3-flash-preview')
 
     variation_hint = ""
     if num_total > 1:
@@ -3604,7 +3604,7 @@ def twin_solve(api_key, question_text, question_image_data=None):
     Returns: dict with solution, answer
     """
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-3-pro-preview')
+    model = genai.GenerativeModel('gemini-3-flash-preview')
 
     if question_image_data:
         prompt = """이 수학 문제 이미지를 직접 보고 풀어주세요.
@@ -3649,7 +3649,7 @@ def twin_generate_choices(api_key, question_text, answer):
     Returns: dict with choices, answer_number
     """
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-3-pro-preview')
+    model = genai.GenerativeModel('gemini-3-flash-preview')
 
     prompt = f"""다음 수학 문제의 정답을 포함한 객관식 선택지 5개를 만들어주세요.
 
@@ -3817,7 +3817,7 @@ def verify_image_text_consistency(api_key, image_data, question_text, choices=No
     for attempt in range(max_retries):
         try:
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-3-pro-preview')
+            model = genai.GenerativeModel('gemini-3-flash-preview')
 
             choices_text = ""
             if choices:
@@ -4274,7 +4274,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
     Generate a single twin question from image data.
 
     Pipeline:
-      1. Generate new problem (change numbers) using gemini-3-pro-preview
+      1. Generate new problem (change numbers) using gemini-3-flash-preview
       2. Modify image (change numbers in diagram) using gemini-3-pro-image-preview
       3. Solve the new problem
       4. If MCQ, generate choices
