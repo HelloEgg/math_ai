@@ -4547,25 +4547,35 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
 
         # Sanitize text so Korean characters never appear inside $...$ math mode
         # (matplotlib's math font 'rm'/Computer Modern has no Korean glyphs)
-        hangul_pattern = re.compile(r'[\uAC00-\uD7AF\u3131-\u318E\u1100-\u11FF]')
+        # Covers: Hangul syllables, jamo, circled Hangul (㉠㉡...), enclosed CJK
+        korean_re = re.compile(
+            r'[\uAC00-\uD7AF\u3131-\u318E\u1100-\u11FF'
+            r'\u3200-\u321E\u3260-\u327F\uFFA0-\uFFDC]'
+        )
 
         def sanitize_line(line):
             """Rebuild line so Korean chars are always outside $ delimiters."""
-            # First convert $$...$$ to $...$
+            # Convert $$...$$ to $...$
             line = line.replace('$$', '$')
+            # Extract \text{Korean} from math and place outside $
+            line = re.sub(r'\\text\{([^}]*)\}', lambda m: m.group(1), line)
 
             # Find all $...$ math blocks and fix them
             def fix_block(m):
                 content = m.group(1)
-                if not hangul_pattern.search(content):
+                if not korean_re.search(content):
                     return m.group(0)  # Pure math, keep as-is
-                # Split by Korean chars, wrap only non-Korean in $
-                sub_parts = re.split(r'([\uAC00-\uD7AF\u3131-\u318E\u1100-\u11FF]+)', content)
+                # Split by Korean chars, wrap only non-Korean parts in $
+                sub_parts = re.split(
+                    r'([\uAC00-\uD7AF\u3131-\u318E\u1100-\u11FF'
+                    r'\u3200-\u321E\u3260-\u327F\uFFA0-\uFFDC]+)',
+                    content
+                )
                 result = ''
                 for sp in sub_parts:
                     if not sp:
                         continue
-                    if hangul_pattern.search(sp):
+                    if korean_re.search(sp):
                         result += sp
                     elif sp.strip():
                         result += '$' + sp + '$'
@@ -4579,6 +4589,9 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
             if line.count('$') % 2 != 0:
                 line = line.replace('$', '')
             return line
+
+        import warnings
+        warnings.filterwarnings('ignore', message=".*does not have a glyph.*")
 
         lines = text.split('\n')
 
@@ -4597,8 +4610,14 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
                 y -= step * 0.5
                 continue
             line = sanitize_line(line)
-            ax.text(0.02, y, line, fontsize=font_size, va='top', ha='left',
-                    transform=ax.transAxes, wrap=True)
+            try:
+                ax.text(0.02, y, line, fontsize=font_size, va='top', ha='left',
+                        transform=ax.transAxes, wrap=True)
+            except (ValueError, Exception):
+                # If matplotlib can't parse the math, strip all $ and render as plain text
+                plain = line.replace('$', '')
+                ax.text(0.02, y, plain, fontsize=font_size, va='top', ha='left',
+                        transform=ax.transAxes, wrap=True)
             y -= step
 
         buf = io.BytesIO()
