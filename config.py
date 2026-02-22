@@ -61,6 +61,10 @@ class Config:
     # File uploads - Math Twin
     IMAGE_FOLDER_TWIN = os.path.join(UPLOAD_FOLDER, 'images_twin')
 
+    # File uploads - PDF Extract
+    IMAGE_FOLDER_PDF = os.path.join(UPLOAD_FOLDER, 'images_pdf')
+    MAX_PDF_SIZE = 50 * 1024 * 1024  # 50 MB
+
     # Allowed extensions
     ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
     ALLOWED_AUDIO_EXTENSIONS = {'mp3', 'wav', 'ogg', 'm4a', 'webm'}
