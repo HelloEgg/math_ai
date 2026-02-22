@@ -4518,20 +4518,103 @@ def get_pdf_extract_image(image_uuid):
     return send_file(image_path, mimetype='image/png')
 
 
+def render_text_to_image(text, font_size=28, max_width=1200, padding=40):
+    """
+    Render text (Korean + LaTeX-style math) onto a white PIL image.
+
+    Args:
+        text: Solution text (may contain LaTeX notation)
+        font_size: Base font size
+        max_width: Maximum image width in pixels
+        padding: Padding around text
+
+    Returns:
+        PIL Image or None if failed
+    """
+    try:
+        # Load Korean-compatible font
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf", font_size)
+        except Exception:
+            font = ImageFont.load_default()
+
+        # Clean up LaTeX for plain-text rendering
+        cleaned = text
+        # Convert common LaTeX to readable text
+        cleaned = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'(\1)/(\2)', cleaned)
+        cleaned = re.sub(r'\\sqrt\{([^}]*)\}', r'sqrt(\1)', cleaned)
+        cleaned = re.sub(r'\\(?:times|cdot)', r'×', cleaned)
+        cleaned = re.sub(r'\\div', r'÷', cleaned)
+        cleaned = re.sub(r'\\pm', r'±', cleaned)
+        cleaned = re.sub(r'\\leq', r'≤', cleaned)
+        cleaned = re.sub(r'\\geq', r'≥', cleaned)
+        cleaned = re.sub(r'\\neq', r'≠', cleaned)
+        cleaned = re.sub(r'\\pi', r'π', cleaned)
+        cleaned = re.sub(r'\\theta', r'θ', cleaned)
+        cleaned = re.sub(r'\\alpha', r'α', cleaned)
+        cleaned = re.sub(r'\\beta', r'β', cleaned)
+        cleaned = re.sub(r'\\(?:left|right|displaystyle)', r'', cleaned)
+        cleaned = re.sub(r'\\(?:text|mathrm|mathbf)\{([^}]*)\}', r'\1', cleaned)
+        cleaned = re.sub(r'\\[a-zA-Z]+', r'', cleaned)  # Remove remaining commands
+        cleaned = re.sub(r'[{}]', '', cleaned)  # Remove braces
+        cleaned = re.sub(r'\$+', '', cleaned)  # Remove dollar signs
+
+        # Word wrap
+        draw_temp = ImageDraw.Draw(Image.new('RGB', (1, 1)))
+        content_width = max_width - 2 * padding
+        lines = []
+        for paragraph in cleaned.split('\n'):
+            if not paragraph.strip():
+                lines.append('')
+                continue
+            words = paragraph.split()
+            if not words:
+                lines.append('')
+                continue
+            current_line = words[0]
+            for word in words[1:]:
+                test_line = current_line + ' ' + word
+                bbox = draw_temp.textbbox((0, 0), test_line, font=font)
+                if bbox[2] - bbox[0] <= content_width:
+                    current_line = test_line
+                else:
+                    lines.append(current_line)
+                    current_line = word
+            lines.append(current_line)
+
+        # Calculate image height
+        line_height = int(font_size * 1.6)
+        img_height = 2 * padding + len(lines) * line_height
+
+        # Create image and draw text
+        img = Image.new('RGB', (max_width, img_height), 'white')
+        draw = ImageDraw.Draw(img)
+        y = padding
+        for line in lines:
+            draw.text((padding, y), line, fill='black', font=font)
+            y += line_height
+
+        return img
+
+    except Exception as e:
+        print(f"render_text_to_image failed: {e}")
+        return None
+
+
 @app.route('/pdf_extract', methods=['POST'])
 def pdf_extract():
     """
     Extract individual questions from a PDF, solve each, and return structured results.
 
-    Input: multipart/form-data with 'pdf' file (Korean math/science/English questions)
-    Output: JSON list of parsed questions with LaTeX, solutions, and image URLs
+    Pipeline (no image generation API calls):
+      1. Convert PDF pages to images (PyMuPDF)
+      2. Gemini parses questions + identifies page/position for cropping
+      3. Crop each question from page images
+      4. Solve each question with Gemini
+      5. Render solution text as image (PIL) and concatenate with question image
 
-    Each question produces:
-    - latexString: The question text in LaTeX
-    - answerString: Step-by-step solution in Korean
-    - questionImageUrl: URL to the re-rendered question image
-    - answerImageUrl: URL to the solution image
-    - answer: Final answer (number for MCQ, or string)
+    Input: multipart/form-data with 'pdf' file
+    Output: JSON array
     """
     if not app.config.get('GEMINI_API_KEY'):
         return jsonify({'error': 'Gemini API key not configured'}), 500
@@ -4555,31 +4638,57 @@ def pdf_extract():
     base_url = request.host_url.rstrip('/')
 
     try:
-        # === Step 1: Send entire PDF to Gemini to parse all questions ===
-        print(f"PDF Extract: Processing PDF ({len(pdf_data)} bytes)...")
+        import fitz  # PyMuPDF
+
+        # === Step 1: Convert PDF pages to images ===
+        print(f"PDF Extract: Converting PDF to images ({len(pdf_data)} bytes)...")
+        doc = fitz.open(stream=pdf_data, filetype="pdf")
+        page_images = []
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            # Render at 2x for good quality
+            mat = fitz.Matrix(2.0, 2.0)
+            pix = page.get_pixmap(matrix=mat)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            page_images.append(img)
+            print(f"  Page {page_num+1}: {pix.width}x{pix.height}")
+        doc.close()
+
+        # === Step 2: Parse questions with Gemini (include page & position) ===
+        print("PDF Extract: Parsing questions with Gemini...")
 
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-3.1-pro-preview')
 
-        parse_prompt = """이 PDF에서 개별 문제를 모두 추출해주세요.
+        parse_prompt = f"""이 PDF에서 개별 문제를 모두 추출해주세요.
+이 PDF는 총 {len(page_images)}페이지입니다.
 
 각 문제에 대해 다음을 정확히 추출하세요:
 1. 문제 번호
 2. 문제 전체 텍스트 (LaTeX 수식 포함, 한국어)
 3. 객관식이면 선택지 포함
-4. 그래프/도형이 있으면 상세 설명
+4. 문제가 있는 페이지 번호 (1부터 시작)
+5. 문제가 페이지에서 시작하는 위치 (0.0=맨위, 1.0=맨아래)
+6. 문제가 페이지에서 끝나는 위치 (0.0=맨위, 1.0=맨아래)
+   - 문제가 여러 페이지에 걸치면 end_page와 end_position도 지정
 
 JSON 배열로만 응답하세요:
 [
-    {
+    {{
         "question_number": 1,
-        "question_text": "문제 전체 텍스트 (LaTeX, 한국어)",
+        "question_text": "문제 전체 텍스트 (LaTeX, 한국어, 선택지 포함)",
         "is_mcq": true,
         "choices": ["① 값1", "② 값2", "③ 값3", "④ 값4", "⑤ 값5"],
-        "has_graph": false,
-        "graph_description": "그래프/도형 설명 (없으면 null)"
-    }
-]"""
+        "page": 1,
+        "start_position": 0.0,
+        "end_position": 0.5,
+        "end_page": 1
+    }}
+]
+
+★ page는 1부터 시작합니다
+★ start_position, end_position은 해당 페이지의 세로 위치 비율 (0.0~1.0)
+★ 문제가 한 페이지 안에 있으면 end_page는 page와 같게"""
 
         pdf_part = {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode('utf-8')}
         parsed = gemini_generate_json(model, [parse_prompt, pdf_part], context="pdf_extract parse")
@@ -4589,13 +4698,72 @@ JSON 배열로만 응답하세요:
 
         print(f"PDF Extract: Found {len(parsed)} questions")
 
-        # === Step 2: Solve each question ===
-        print("PDF Extract: Solving questions...")
+        # === Step 3 & 4: Crop questions, solve, render solution images ===
+        results = []
 
-        solve_prompt_template = """다음 문제를 풀어주세요.
+        for q in parsed:
+            q_num = q.get('question_number', '?')
+            q_text = q.get('question_text', '')
+            is_mcq = q.get('is_mcq', False)
+            choices = q.get('choices', [])
+            page = q.get('page', 1)
+            start_pos = q.get('start_position', 0.0)
+            end_pos = q.get('end_position', 1.0)
+            end_page = q.get('end_page', page)
+
+            print(f"  Q{q_num}: page={page}, pos={start_pos:.2f}-{end_pos:.2f}, end_page={end_page}")
+
+            try:
+                # --- Crop question image from PDF page(s) ---
+                question_image_url = None
+                question_img = None
+                try:
+                    page_idx = max(0, min(page - 1, len(page_images) - 1))
+                    end_page_idx = max(0, min(end_page - 1, len(page_images) - 1))
+                    src_img = page_images[page_idx]
+                    w, h = src_img.size
+
+                    # Add margin around the crop
+                    margin = int(h * 0.02)
+                    top = max(0, int(h * start_pos) - margin)
+                    bottom = min(h, int(h * end_pos) + margin)
+
+                    if end_page_idx == page_idx:
+                        # Single page crop
+                        question_img = src_img.crop((0, top, w, bottom))
+                    else:
+                        # Multi-page: crop from start page + full intermediate pages + end page
+                        parts = [src_img.crop((0, top, w, h))]
+                        for mid_idx in range(page_idx + 1, end_page_idx):
+                            parts.append(page_images[mid_idx])
+                        end_img = page_images[end_page_idx]
+                        end_bottom = min(end_img.size[1], int(end_img.size[1] * end_pos) + margin)
+                        parts.append(end_img.crop((0, 0, end_img.size[0], end_bottom)))
+                        # Concatenate vertically
+                        total_h = sum(p.size[1] for p in parts)
+                        max_w = max(p.size[0] for p in parts)
+                        question_img = Image.new('RGB', (max_w, total_h), 'white')
+                        y_offset = 0
+                        for p in parts:
+                            question_img.paste(p, (0, y_offset))
+                            y_offset += p.size[1]
+
+                    # Save question image
+                    q_uuid = str(uuid.uuid4())
+                    q_path = os.path.join(app.config['IMAGE_FOLDER_PDF'], f"{q_uuid}.png")
+                    question_img.save(q_path, 'PNG')
+                    question_image_url = f"{base_url}/pdf_extract/images/{q_uuid}"
+                    print(f"  Q{q_num}: Saved question image ({question_img.size[0]}x{question_img.size[1]})")
+
+                except Exception as e:
+                    print(f"  Q{q_num}: Warning: Question crop failed: {e}")
+
+                # --- Solve ---
+                print(f"  Q{q_num}: Solving...")
+                solve_prompt = f"""다음 문제를 풀어주세요.
 
 문제:
-{question_text}
+{q_text}
 
 풀이 규칙:
 - 단계별로 깔끔하게 풀이하세요
@@ -4605,27 +4773,11 @@ JSON 배열로만 응답하세요:
 JSON으로만 응답하세요:
 {{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답"}}"""
 
-        results = []
-
-        for q in parsed:
-            q_num = q.get('question_number', '?')
-            q_text = q.get('question_text', '')
-            is_mcq = q.get('is_mcq', False)
-            choices = q.get('choices', [])
-            has_graph = q.get('has_graph', False)
-            graph_desc = q.get('graph_description')
-
-            print(f"  Q{q_num}: Solving...")
-
-            try:
-                # Solve
-                solve_prompt = solve_prompt_template.format(question_text=q_text)
                 solve_result = gemini_generate_json(model, solve_prompt, context=f"pdf_extract solve Q{q_num}")
                 solution_text = solve_result.get('solution', '')
                 answer = solve_result.get('answer', '')
                 print(f"  Q{q_num}: Answer = {answer}")
 
-                # Determine answer_number for MCQ
                 answer_number = answer
                 if is_mcq and choices:
                     try:
@@ -4633,44 +4785,39 @@ JSON으로만 응답하세요:
                     except (ValueError, TypeError):
                         answer_number = answer
 
-                # Generate question image
-                question_image_url = None
-                try:
-                    print(f"  Q{q_num}: Generating question image...")
-                    q_image_data = generate_question_image(
-                        api_key=api_key,
-                        latex_string=q_text,
-                        choices=choices if is_mcq else None,
-                        graph_description=graph_desc,
-                        has_graph=has_graph
-                    )
-                    if q_image_data:
-                        q_uuid = str(uuid.uuid4())
-                        q_path = os.path.join(app.config['IMAGE_FOLDER_PDF'], f"{q_uuid}.png")
-                        with open(q_path, 'wb') as f:
-                            f.write(q_image_data)
-                        question_image_url = f"{base_url}/pdf_extract/images/{q_uuid}"
-                        print(f"  Q{q_num}: Saved question image: {q_uuid}")
-                except Exception as e:
-                    print(f"  Q{q_num}: Warning: Question image failed: {e}")
-
-                # Generate solution image
+                # --- Render solution as image (PIL) and concatenate with question ---
                 answer_image_url = None
                 try:
-                    print(f"  Q{q_num}: Generating solution image...")
-                    s_image_data = generate_solution_image(
-                        api_key=api_key,
-                        solution_text=solution_text
-                    )
-                    if s_image_data:
+                    solution_img = render_text_to_image(solution_text)
+                    if question_img and solution_img:
+                        # Concatenate: question on top, solution below with divider
+                        q_w, q_h = question_img.size
+                        s_w, s_h = solution_img.size
+                        combined_w = max(q_w, s_w)
+                        divider_h = 4
+                        padding = 20
+                        combined_h = q_h + divider_h + padding + s_h
+                        combined = Image.new('RGB', (combined_w, combined_h), 'white')
+                        combined.paste(question_img, (0, 0))
+                        # Draw divider line
+                        draw = ImageDraw.Draw(combined)
+                        draw.line([(20, q_h + padding // 2), (combined_w - 20, q_h + padding // 2)],
+                                  fill='gray', width=2)
+                        combined.paste(solution_img, (0, q_h + divider_h + padding))
+                        final_img = combined
+                    elif solution_img:
+                        final_img = solution_img
+                    else:
+                        final_img = None
+
+                    if final_img:
                         s_uuid = str(uuid.uuid4())
                         s_path = os.path.join(app.config['IMAGE_FOLDER_PDF'], f"{s_uuid}.png")
-                        with open(s_path, 'wb') as f:
-                            f.write(s_image_data)
+                        final_img.save(s_path, 'PNG')
                         answer_image_url = f"{base_url}/pdf_extract/images/{s_uuid}"
-                        print(f"  Q{q_num}: Saved solution image: {s_uuid}")
+                        print(f"  Q{q_num}: Saved answer image ({final_img.size[0]}x{final_img.size[1]})")
                 except Exception as e:
-                    print(f"  Q{q_num}: Warning: Solution image failed: {e}")
+                    print(f"  Q{q_num}: Warning: Answer image failed: {e}")
 
                 results.append({
                     "latexString": q_text,
