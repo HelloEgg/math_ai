@@ -4518,13 +4518,13 @@ def get_pdf_extract_image(image_uuid):
     return send_file(image_path, mimetype='image/png')
 
 
-def render_text_to_image(text, font_size=28, max_width=1200, padding=40):
+def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
     """
-    Render text (Korean + LaTeX-style math) onto a white PIL image.
+    Render text (Korean + LaTeX math) onto a white PIL image using matplotlib.
 
     Args:
-        text: Solution text (may contain LaTeX notation)
-        font_size: Base font size
+        text: Text that may contain LaTeX notation (inline $...$ or $$...$$)
+        font_size: Matplotlib font size
         max_width: Maximum image width in pixels
         padding: Padding around text
 
@@ -4532,73 +4532,45 @@ def render_text_to_image(text, font_size=28, max_width=1200, padding=40):
         PIL Image or None if failed
     """
     try:
-        # Load Korean font (NanumGothic bundled with the app)
-        font_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts', 'NanumGothic.ttf')
-        try:
-            font = ImageFont.truetype(font_path, font_size)
-        except Exception:
-            # Fallback to system path
-            try:
-                font = ImageFont.truetype("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", font_size)
-            except Exception:
-                font = ImageFont.load_default()
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from matplotlib import font_manager
 
-        # Clean up LaTeX for plain-text rendering
-        cleaned = text
-        # Convert common LaTeX to readable text
-        cleaned = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'(\1)/(\2)', cleaned)
-        cleaned = re.sub(r'\\sqrt\{([^}]*)\}', r'sqrt(\1)', cleaned)
-        cleaned = re.sub(r'\\(?:times|cdot)', r'×', cleaned)
-        cleaned = re.sub(r'\\div', r'÷', cleaned)
-        cleaned = re.sub(r'\\pm', r'±', cleaned)
-        cleaned = re.sub(r'\\leq', r'≤', cleaned)
-        cleaned = re.sub(r'\\geq', r'≥', cleaned)
-        cleaned = re.sub(r'\\neq', r'≠', cleaned)
-        cleaned = re.sub(r'\\pi', r'π', cleaned)
-        cleaned = re.sub(r'\\theta', r'θ', cleaned)
-        cleaned = re.sub(r'\\alpha', r'α', cleaned)
-        cleaned = re.sub(r'\\beta', r'β', cleaned)
-        cleaned = re.sub(r'\\(?:left|right|displaystyle)', r'', cleaned)
-        cleaned = re.sub(r'\\(?:text|mathrm|mathbf)\{([^}]*)\}', r'\1', cleaned)
-        cleaned = re.sub(r'\\[a-zA-Z]+', r'', cleaned)  # Remove remaining commands
-        cleaned = re.sub(r'[{}]', '', cleaned)  # Remove braces
-        cleaned = re.sub(r'\$+', '', cleaned)  # Remove dollar signs
+        # Register Korean font
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        font_path = os.path.join(app_dir, 'fonts', 'NanumGothic.ttf')
+        if os.path.exists(font_path):
+            font_manager.fontManager.addfont(font_path)
+            plt.rcParams['font.family'] = 'NanumGothic'
+        plt.rcParams['mathtext.fontset'] = 'cm'
 
-        # Word wrap
-        draw_temp = ImageDraw.Draw(Image.new('RGB', (1, 1)))
-        content_width = max_width - 2 * padding
-        lines = []
-        for paragraph in cleaned.split('\n'):
-            if not paragraph.strip():
-                lines.append('')
-                continue
-            words = paragraph.split()
-            if not words:
-                lines.append('')
-                continue
-            current_line = words[0]
-            for word in words[1:]:
-                test_line = current_line + ' ' + word
-                bbox = draw_temp.textbbox((0, 0), test_line, font=font)
-                if bbox[2] - bbox[0] <= content_width:
-                    current_line = test_line
-                else:
-                    lines.append(current_line)
-                    current_line = word
-            lines.append(current_line)
+        lines = text.split('\n')
 
-        # Calculate image height
-        line_height = int(font_size * 1.6)
-        img_height = 2 * padding + len(lines) * line_height
+        # Calculate figure height based on line count
+        line_height = 0.4  # inches per line
+        fig_height = max(1.0, len(lines) * line_height + 0.5)
+        fig_width = max_width / 150  # convert px to inches at 150 dpi
 
-        # Create image and draw text
-        img = Image.new('RGB', (max_width, img_height), 'white')
-        draw = ImageDraw.Draw(img)
-        y = padding
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+        ax.axis('off')
+
+        y = 0.98
+        step = 1.0 / max(len(lines), 1) * 0.9
         for line in lines:
-            draw.text((padding, y), line, fill='black', font=font)
-            y += line_height
+            if line.strip() == '':
+                y -= step * 0.5
+                continue
+            ax.text(0.02, y, line, fontsize=font_size, va='top', ha='left',
+                    transform=ax.transAxes, wrap=True)
+            y -= step
 
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                    facecolor='white', edgecolor='none', pad_inches=0.2)
+        plt.close(fig)
+        buf.seek(0)
+        img = Image.open(buf).convert('RGB')
         return img
 
     except Exception as e:
