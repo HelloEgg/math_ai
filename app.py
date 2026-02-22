@@ -4532,11 +4532,16 @@ def render_text_to_image(text, font_size=28, max_width=1200, padding=40):
         PIL Image or None if failed
     """
     try:
-        # Load Korean font (NanumGothic)
+        # Load Korean font (NanumGothic bundled with the app)
+        font_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts', 'NanumGothic.ttf')
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", font_size)
+            font = ImageFont.truetype(font_path, font_size)
         except Exception:
-            font = ImageFont.load_default()
+            # Fallback to system path
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", font_size)
+            except Exception:
+                font = ImageFont.load_default()
 
         # Clean up LaTeX for plain-text rendering
         cleaned = text
