@@ -81,6 +81,8 @@ def create_app(config_class=Config):
     os.makedirs(app.config['AUDIO_FOLDER_KOREAN_DEEP'], exist_ok=True)
     # Create upload directories - Math Twin
     os.makedirs(app.config['IMAGE_FOLDER_TWIN'], exist_ok=True)
+    # Create upload directories - PDF Extract
+    os.makedirs(app.config.get('IMAGE_FOLDER_PDF', os.path.join('uploads', 'images_pdf')), exist_ok=True)
 
     # Create database tables
     with app.app_context():
@@ -4496,6 +4498,204 @@ def generate_math_twin_batch():
 
     print(f"Generated {len(results)} twins successfully")
     return jsonify(results)
+
+
+@app.route('/pdf_extract/images/<image_uuid>', methods=['GET'])
+def get_pdf_extract_image(image_uuid):
+    """Get a generated PDF extract image by UUID."""
+    uuid_pattern = re.compile(r'^[a-f0-9\-]{36}$')
+    if not uuid_pattern.match(image_uuid):
+        return jsonify({'error': 'Invalid image UUID'}), 400
+
+    image_path = os.path.join(app.config['IMAGE_FOLDER_PDF'], f"{image_uuid}.png")
+    if not os.path.exists(image_path):
+        return jsonify({'error': 'Image not found'}), 404
+
+    download = request.args.get('download', 'false').lower() == 'true'
+    if download:
+        return send_file(image_path, mimetype='image/png', as_attachment=True,
+                         download_name=f"pdf_extract_{image_uuid}.png")
+    return send_file(image_path, mimetype='image/png')
+
+
+@app.route('/pdf_extract', methods=['POST'])
+def pdf_extract():
+    """
+    Extract individual questions from a PDF, solve each, and return structured results.
+
+    Input: multipart/form-data with 'pdf' file (Korean math/science/English questions)
+    Output: JSON list of parsed questions with LaTeX, solutions, and image URLs
+
+    Each question produces:
+    - latexString: The question text in LaTeX
+    - answerString: Step-by-step solution in Korean
+    - questionImageUrl: URL to the re-rendered question image
+    - answerImageUrl: URL to the solution image
+    - answer: Final answer (number for MCQ, or string)
+    """
+    if not app.config.get('GEMINI_API_KEY'):
+        return jsonify({'error': 'Gemini API key not configured'}), 500
+
+    if 'pdf' not in request.files:
+        return jsonify({'error': 'No PDF file provided. Use form field name "pdf"'}), 400
+
+    pdf_file = request.files['pdf']
+    if pdf_file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+
+    if not pdf_file.filename.lower().endswith('.pdf'):
+        return jsonify({'error': 'File must be a PDF'}), 400
+
+    pdf_data = pdf_file.read()
+    max_pdf_size = app.config.get('MAX_PDF_SIZE', 50 * 1024 * 1024)
+    if len(pdf_data) > max_pdf_size:
+        return jsonify({'error': 'PDF file too large'}), 400
+
+    api_key = app.config['GEMINI_API_KEY']
+    base_url = request.host_url.rstrip('/')
+
+    try:
+        # === Step 1: Send entire PDF to Gemini to parse all questions ===
+        print(f"PDF Extract: Processing PDF ({len(pdf_data)} bytes)...")
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-3.1-pro-preview')
+
+        parse_prompt = """이 PDF에서 개별 문제를 모두 추출해주세요.
+
+각 문제에 대해 다음을 정확히 추출하세요:
+1. 문제 번호
+2. 문제 전체 텍스트 (LaTeX 수식 포함, 한국어)
+3. 객관식이면 선택지 포함
+4. 그래프/도형이 있으면 상세 설명
+
+JSON 배열로만 응답하세요:
+[
+    {
+        "question_number": 1,
+        "question_text": "문제 전체 텍스트 (LaTeX, 한국어)",
+        "is_mcq": true,
+        "choices": ["① 값1", "② 값2", "③ 값3", "④ 값4", "⑤ 값5"],
+        "has_graph": false,
+        "graph_description": "그래프/도형 설명 (없으면 null)"
+    }
+]"""
+
+        pdf_part = {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode('utf-8')}
+        parsed = gemini_generate_json(model, [parse_prompt, pdf_part], context="pdf_extract parse")
+
+        if not isinstance(parsed, list):
+            parsed = [parsed]
+
+        print(f"PDF Extract: Found {len(parsed)} questions")
+
+        # === Step 2: Solve each question ===
+        print("PDF Extract: Solving questions...")
+
+        solve_prompt_template = """다음 문제를 풀어주세요.
+
+문제:
+{question_text}
+
+풀이 규칙:
+- 단계별로 깔끔하게 풀이하세요
+- 검산 과정은 포함하지 마세요
+- 한국어로 작성하세요
+
+JSON으로만 응답하세요:
+{{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답"}}"""
+
+        results = []
+
+        for q in parsed:
+            q_num = q.get('question_number', '?')
+            q_text = q.get('question_text', '')
+            is_mcq = q.get('is_mcq', False)
+            choices = q.get('choices', [])
+            has_graph = q.get('has_graph', False)
+            graph_desc = q.get('graph_description')
+
+            print(f"  Q{q_num}: Solving...")
+
+            try:
+                # Solve
+                solve_prompt = solve_prompt_template.format(question_text=q_text)
+                solve_result = gemini_generate_json(model, solve_prompt, context=f"pdf_extract solve Q{q_num}")
+                solution_text = solve_result.get('solution', '')
+                answer = solve_result.get('answer', '')
+                print(f"  Q{q_num}: Answer = {answer}")
+
+                # Determine answer_number for MCQ
+                answer_number = answer
+                if is_mcq and choices:
+                    try:
+                        answer_number = int(answer)
+                    except (ValueError, TypeError):
+                        answer_number = answer
+
+                # Generate question image
+                question_image_url = None
+                try:
+                    print(f"  Q{q_num}: Generating question image...")
+                    q_image_data = generate_question_image(
+                        api_key=api_key,
+                        latex_string=q_text,
+                        choices=choices if is_mcq else None,
+                        graph_description=graph_desc,
+                        has_graph=has_graph
+                    )
+                    if q_image_data:
+                        q_uuid = str(uuid.uuid4())
+                        q_path = os.path.join(app.config['IMAGE_FOLDER_PDF'], f"{q_uuid}.png")
+                        with open(q_path, 'wb') as f:
+                            f.write(q_image_data)
+                        question_image_url = f"{base_url}/pdf_extract/images/{q_uuid}"
+                        print(f"  Q{q_num}: Saved question image: {q_uuid}")
+                except Exception as e:
+                    print(f"  Q{q_num}: Warning: Question image failed: {e}")
+
+                # Generate solution image
+                answer_image_url = None
+                try:
+                    print(f"  Q{q_num}: Generating solution image...")
+                    s_image_data = generate_solution_image(
+                        api_key=api_key,
+                        solution_text=solution_text
+                    )
+                    if s_image_data:
+                        s_uuid = str(uuid.uuid4())
+                        s_path = os.path.join(app.config['IMAGE_FOLDER_PDF'], f"{s_uuid}.png")
+                        with open(s_path, 'wb') as f:
+                            f.write(s_image_data)
+                        answer_image_url = f"{base_url}/pdf_extract/images/{s_uuid}"
+                        print(f"  Q{q_num}: Saved solution image: {s_uuid}")
+                except Exception as e:
+                    print(f"  Q{q_num}: Warning: Solution image failed: {e}")
+
+                results.append({
+                    "latexString": q_text,
+                    "answerString": solution_text,
+                    "questionImageUrl": question_image_url,
+                    "answerImageUrl": answer_image_url,
+                    "answer": answer_number
+                })
+
+            except Exception as e:
+                print(f"  Q{q_num}: Error: {e}")
+                results.append({
+                    "latexString": q_text,
+                    "answerString": f"풀이 실패: {str(e)}",
+                    "questionImageUrl": None,
+                    "answerImageUrl": None,
+                    "answer": None
+                })
+
+        print(f"PDF Extract: Completed {len(results)} questions")
+        return jsonify(results)
+
+    except Exception as e:
+        print(f"PDF Extract error: {e}")
+        return jsonify({'error': 'Failed to process PDF', 'details': str(e)}), 500
 
 
 if __name__ == '__main__':
