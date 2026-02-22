@@ -4772,8 +4772,13 @@ def _normalize_latex_for_matplotlib(s):
     return s
 
 
-def _render_math_to_image(latex_str, font_size_pt):
-    """Render a single LaTeX math expression to a tight PIL Image."""
+def _render_math_to_image(latex_str, font_size_pt, pil_font=None):
+    """Render a LaTeX math expression to a tight PIL Image.
+
+    Non-ASCII characters (Korean ㉠, ㉡, 약, etc.) are wrapped in \\mathrm{}
+    so that matplotlib renders them with NanumGothic via the custom fontset,
+    keeping the LaTeX command structure intact (e.g. \\frac{㉠}{㉡} works).
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -4781,6 +4786,16 @@ def _render_math_to_image(latex_str, font_size_pt):
     import numpy as np
 
     latex_str = _normalize_latex_for_matplotlib(latex_str)
+
+    # Wrap runs of non-ASCII chars in \mathrm{} so they use the rm font
+    # (NanumGothic) instead of the math italic font (which lacks Korean).
+    # Avoid double-wrapping if already inside \mathrm{}.
+    latex_str = re.sub(
+        r'(?<!\\mathrm\{)([^\x00-\x7F]+)',
+        r'\\mathrm{\1}',
+        latex_str,
+    )
+
     with _warnings.catch_warnings():
         _warnings.simplefilter('ignore')
         fig = plt.figure(figsize=(10, 0.8))
@@ -4832,7 +4847,11 @@ def _render_text_to_image_matplotlib(text, font_size=16, max_width=1200, padding
                 fm.fontManager.addfont(_mpl_font_path)
                 prop = fm.FontProperties(fname=_mpl_font_path)
                 plt.rcParams['font.family'] = prop.get_name()
-            plt.rcParams['mathtext.fontset'] = 'cm'
+            # Use 'custom' fontset so \mathrm{Korean} renders with NanumGothic
+            plt.rcParams['mathtext.fontset'] = 'custom'
+            plt.rcParams['mathtext.rm'] = 'NanumGothic'
+            plt.rcParams['mathtext.it'] = 'DejaVu Sans:italic'
+            plt.rcParams['mathtext.bf'] = 'DejaVu Sans:bold'
             _render_text_to_image_matplotlib._font_ready = True
 
         # Pillow font for Korean text segments
@@ -4869,7 +4888,7 @@ def _render_text_to_image_matplotlib(text, font_size=16, max_width=1200, padding
                 if is_math:
                     latex = seg.strip('$')
                     try:
-                        math_img = _render_math_to_image(latex, font_size)
+                        math_img = _render_math_to_image(latex, font_size, pil_font)
                         seg_renders.append(('math', math_img))
                         line_h = max(line_h, math_img.height + 8)
                     except Exception:
