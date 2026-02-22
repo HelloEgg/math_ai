@@ -4669,14 +4669,16 @@ def pdf_extract():
 
 각 문제에 대해 3가지를 추출하세요:
 1. question_text: 문제 텍스트 (LaTeX 수식 포함, 한국어). 선택지는 여기에 포함하지 마세요.
-2. diagrams: 문제에 포함된 그림/도형/그래프의 위치 (bounding box). 텍스트가 아닌 순수 이미지/도형 영역만.
+2. diagrams: 문제에 포함된 그림/도형/그래프/표의 전체 영역 (bounding box).
 3. choices: 객관식 선택지 (있는 경우만)
 
-★ diagrams의 bounding box는 해당 페이지 이미지 기준 비율 좌표입니다:
-  - x_min, y_min: 좌상단 (0.0~1.0)
-  - x_max, y_max: 우하단 (0.0~1.0)
+★ diagrams bounding box 규칙:
+  - 해당 페이지 이미지 기준 비율 좌표 (0.0~1.0)
+  - x_min, y_min: 좌상단, x_max, y_max: 우하단
   - 그림이 여러 개면 각각의 bounding box를 별도로
   - 그림이 없으면 빈 배열 []
+  - 중요: 그림 안에 포함된 텍스트, 레이블, 말풍선, 축 이름, 숫자 등도 모두 포함해서 crop하세요
+  - 그림의 전체 영역을 넉넉하게 잡아주세요. 잘리는 것보다 여유있게 잡는 게 좋습니다
 
 JSON 배열로만 응답하세요:
 [
@@ -4698,7 +4700,7 @@ JSON 배열로만 응답하세요:
 ]
 
 ★ page는 1부터 시작합니다
-★ diagrams에는 텍스트 영역을 포함하지 마세요. 순수 그림/도형/그래프 영역만 포함하세요.
+★ diagrams는 그림 전체를 포함해야 합니다 (그림 안의 텍스트, 레이블, 화살표, 말풍선 등 모두 포함)
 ★ 그림이 없는 문제는 diagrams를 빈 배열 []로"""
 
         pdf_part = {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode('utf-8')}
