@@ -4542,23 +4542,47 @@ def _get_katex_assets():
     return _get_katex_assets._cache
 
 
+def _find_chromium_executable():
+    """Search for a usable Chromium executable across common locations."""
+    # Candidate cache directories (current user, root, common service users)
+    cache_dirs = []
+    cache_dirs.append(os.path.expanduser('~/.cache/ms-playwright'))
+    for home in ['/root', '/home/ubuntu', '/home/user']:
+        d = os.path.join(home, '.cache', 'ms-playwright')
+        if d not in cache_dirs:
+            cache_dirs.append(d)
+
+    # Binary paths relative to a versioned directory (newest version first)
+    binary_subpaths = [
+        ('chromium-', 'chrome-linux', 'chrome'),
+        ('chromium_headless_shell-', 'chrome-linux', 'headless_shell'),
+        ('chromium_headless_shell-', 'chrome-headless-shell-linux64', 'chrome-headless-shell'),
+    ]
+
+    for cache_dir in cache_dirs:
+        if not os.path.isdir(cache_dir):
+            continue
+        entries = sorted(os.listdir(cache_dir), reverse=True)
+        for prefix, subdir, binary in binary_subpaths:
+            for entry in entries:
+                if entry.startswith(prefix):
+                    candidate = os.path.join(cache_dir, entry, subdir, binary)
+                    if os.path.isfile(candidate):
+                        return candidate
+    return None
+
+
 def _get_playwright_browser():
     """Get or create a shared Playwright browser instance."""
+    # After a definitive failure, stop retrying to avoid repeated warnings
+    if getattr(_get_playwright_browser, '_failed', False):
+        return None
     if not hasattr(_get_playwright_browser, '_browser') or _get_playwright_browser._browser is None:
         try:
             from playwright.sync_api import sync_playwright
             pw = sync_playwright().start()
             _get_playwright_browser._pw = pw
-            # Find the chromium executable
-            chrome_path = None
-            pw_cache = os.path.expanduser('~/.cache/ms-playwright')
-            if os.path.isdir(pw_cache):
-                for entry in sorted(os.listdir(pw_cache), reverse=True):
-                    if entry.startswith('chromium-'):
-                        candidate = os.path.join(pw_cache, entry, 'chrome-linux', 'chrome')
-                        if os.path.isfile(candidate):
-                            chrome_path = candidate
-                            break
+            chrome_path = _find_chromium_executable()
             launch_args = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu',
                            '--disable-dev-shm-usage', '--font-render-hinting=none']
             if chrome_path:
@@ -4569,6 +4593,7 @@ def _get_playwright_browser():
         except Exception as e:
             print(f"Playwright browser launch failed: {e}")
             _get_playwright_browser._browser = None
+            _get_playwright_browser._failed = True
     return _get_playwright_browser._browser
 
 
