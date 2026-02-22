@@ -4555,41 +4555,143 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
         _latex_unicode = [
             (r'\times', '×'), (r'\cdot', '·'), (r'\pm', '±'),
             (r'\rightarrow', '→'), (r'\leftarrow', '←'),
+            (r'\longrightarrow', '→'), (r'\longleftarrow', '←'),
             (r'\Rightarrow', '⇒'), (r'\Leftarrow', '⇐'),
+            (r'\leftrightarrow', '↔'), (r'\Leftrightarrow', '⇔'),
             (r'\leq', '≤'), (r'\geq', '≥'), (r'\neq', '≠'),
-            (r'\approx', '≈'), (r'\infty', '∞'),
+            (r'\approx', '≈'), (r'\infty', '∞'), (r'\propto', '∝'),
             (r'\alpha', 'α'), (r'\beta', 'β'), (r'\gamma', 'γ'),
             (r'\delta', 'δ'), (r'\theta', 'θ'), (r'\lambda', 'λ'),
             (r'\pi', 'π'), (r'\sigma', 'σ'), (r'\omega', 'ω'),
+            (r'\Delta', 'Δ'), (r'\Sigma', 'Σ'), (r'\Omega', 'Ω'),
+            (r'\Gamma', 'Γ'), (r'\Lambda', 'Λ'), (r'\Phi', 'Φ'),
+            (r'\Psi', 'Ψ'), (r'\Pi', 'Π'), (r'\Theta', 'Θ'),
+            (r'\mu', 'μ'), (r'\nu', 'ν'), (r'\phi', 'φ'),
+            (r'\epsilon', 'ε'), (r'\varepsilon', 'ε'),
+            (r'\eta', 'η'), (r'\rho', 'ρ'),
+            (r'\tau', 'τ'), (r'\chi', 'χ'), (r'\psi', 'ψ'),
+            (r'\zeta', 'ζ'), (r'\kappa', 'κ'), (r'\xi', 'ξ'),
+            (r'\in', '∈'), (r'\notin', '∉'),
+            (r'\subset', '⊂'), (r'\supset', '⊃'),
+            (r'\subseteq', '⊆'), (r'\supseteq', '⊇'),
+            (r'\cup', '∪'), (r'\cap', '∩'),
+            (r'\forall', '∀'), (r'\exists', '∃'),
+            (r'\nabla', '∇'), (r'\partial', '∂'),
+            (r'\circ', '∘'), (r'\bullet', '•'),
+            (r'\dots', '…'), (r'\cdots', '⋯'), (r'\ldots', '…'),
+            (r'\prime', '′'), (r'\degree', '°'),
+            (r'\div', '÷'), (r'\mp', '∓'),
+            (r'\ll', '≪'), (r'\gg', '≫'),
+            (r'\perp', '⊥'), (r'\parallel', '∥'),
+            (r'\angle', '∠'), (r'\triangle', '△'),
         ]
 
+        # Unicode sub/superscript maps for high-quality fallback rendering
+        _sup_map = str.maketrans(
+            '0123456789+-=()ni',
+            '⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱ'
+        )
+        _sub_map = str.maketrans(
+            '0123456789+-=()',
+            '₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎'
+        )
+
         def _latex_to_plain(s):
-            """Convert a LaTeX math string to readable plain text."""
+            """Convert a LaTeX math string to readable Unicode text."""
             for cmd, uni in _latex_unicode:
                 s = s.replace(cmd, uni)
-            s = re.sub(r'\\text\{([^}]*)\}', r'\1', s)         # \text{abc} → abc
+            s = re.sub(r'\\text\{([^}]*)\}', r'\1', s)
+            s = re.sub(r'\\mathrm\{([^}]*)\}', r'\1', s)
+            s = re.sub(r'\\mathbf\{([^}]*)\}', r'\1', s)
             s = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'(\1)/(\2)', s)
             s = re.sub(r'\\sqrt\{([^}]*)\}', r'√(\1)', s)
+            s = re.sub(r'\\overline\{([^}]*)\}', r'\1', s)
+            # Superscripts: ^{235} → ²³⁵ (Unicode superscript digits)
+            s = re.sub(r'\^\{([^}]*)\}', lambda m: m.group(1).translate(_sup_map), s)
+            s = re.sub(r'\^([0-9])', lambda m: m.group(1).translate(_sup_map), s)
+            # Subscripts: _{92} → ₉₂ (Unicode subscript digits)
+            s = re.sub(r'_\{([^}]*)\}', lambda m: m.group(1).translate(_sub_map), s)
+            s = re.sub(r'_([0-9])', lambda m: m.group(1).translate(_sub_map), s)
             s = re.sub(r'\\[a-zA-Z]+', '', s)                   # remove remaining commands
             s = s.replace('{', '').replace('}', '')              # remove braces
             s = re.sub(r'\s+', ' ', s).strip()                  # collapse whitespace
             return s
 
+        def _preprocess_mathtext(content):
+            """Convert LaTeX to matplotlib mathtext-compatible format."""
+            # \text{...} → \mathrm{...} (mathtext supports \mathrm but not \text)
+            content = re.sub(r'\\text\{([^}]*)\}', r'\\mathrm{\1}', content)
+            # \textbf → \mathbf, \boldsymbol → \mathbf
+            content = re.sub(r'\\textbf\{([^}]*)\}', r'\\mathbf{\1}', content)
+            content = re.sub(r'\\boldsymbol\{([^}]*)\}', r'\\mathbf{\1}', content)
+            # \ce{...} → strip wrapper (mhchem not supported by mathtext)
+            content = re.sub(r'\\ce\{([^}]*)\}', r'\1', content)
+            # Fix orphan sub/superscript at start: _{...} → {}_{...}
+            content = re.sub(r'^([_^])', r'{}\1', content)
+            # Fix orphan sub/superscript after operators/spaces
+            content = re.sub(r'([\s+\-=,;:!]) *([_^])', r'\1 {}\2', content)
+            # Remove \displaystyle, \textstyle
+            content = re.sub(r'\\(?:displaystyle|textstyle)\s*', '', content)
+            # \quad, \qquad → space
+            content = re.sub(r'\\q?quad\b', ' ', content)
+            # \, \; \: \! → thin space
+            content = re.sub(r'\\[,;:!]', ' ', content)
+            # Strip \left / \right before delimiters (keep the delimiter)
+            content = re.sub(r'\\left\s*(?=[(\[{|.\\])', '', content)
+            content = re.sub(r'\\right\s*(?=[)\]}|.\\])', '', content)
+            # \overrightarrow{AB} → simpler form
+            content = re.sub(r'\\overrightarrow\{([^}]*)\}', r'\\vec{\1}', content)
+            return content
+
         def sanitize_line(line):
             """Rebuild line so Korean chars are always outside $ delimiters."""
-            line = line.replace('$$', '$')
-            # \text{Korean} outside math → just Korean
-            line = re.sub(r'\\text\{([^}]*)\}', lambda m: m.group(1), line)
+            # Normalize: collapse consecutive $ into single $
+            line = re.sub(r'\${2,}', '$', line)
 
-            def fix_block(m):
-                content = m.group(1)
-                if not korean_re.search(content):
-                    return m.group(0)  # Pure math, keep as-is
-                # Korean in math → convert entire block to plain text
-                # (splitting produces broken LaTeX like $A_$ from $A_㉠$)
-                return _latex_to_plain(content)
+            # Process $...$ blocks and non-math text separately
+            parts = re.split(r'(\$[^$]+\$)', line)
+            result = []
+            for part in parts:
+                if part.startswith('$') and part.endswith('$') and len(part) > 2:
+                    # Math block
+                    content = part[1:-1]
+                    if korean_re.search(content):
+                        # Korean in math → strip \text{} wrappers then convert to
+                        # readable Unicode (splitting produces broken LaTeX)
+                        content = re.sub(r'\\text\{([^}]*)\}', r'\1', content)
+                        result.append(_latex_to_plain(content))
+                    else:
+                        # Pure math → preprocess for mathtext compatibility
+                        preprocessed = _preprocess_mathtext(content)
+                        result.append('$' + preprocessed + '$')
+                else:
+                    # Non-math text: strip \text{} wrappers
+                    part = re.sub(r'\\text\{([^}]*)\}', lambda m: m.group(1), part)
+                    result.append(part)
+            line = ''.join(result)
 
-            line = re.sub(r'\$([^$]+)\$', fix_block, line)
+            # Detect undelimited LaTeX (LaTeX commands without $...$ wrappers)
+            if '$' not in line and re.search(r'\\[a-zA-Z]+|[_^]\{', line):
+                seg_parts = re.split(
+                    r'([\uAC00-\uD7AF\u3131-\u318E\u1100-\u11FF'
+                    r'\u3200-\u321E\u3260-\u327F\uFFA0-\uFFDC]+)',
+                    line
+                )
+                for idx, seg in enumerate(seg_parts):
+                    if (not korean_re.search(seg)
+                            and re.search(r'\\[a-zA-Z]+|[_^]\{', seg)):
+                        # Find where LaTeX content starts
+                        m = re.search(r'[\\_{^]', seg)
+                        if m:
+                            prefix = seg[:m.start()]
+                            math_part = seg[m.start():].rstrip()
+                            trail_ws = seg[len(seg.rstrip()):]
+                            if math_part:
+                                preprocessed = _preprocess_mathtext(math_part)
+                                seg_parts[idx] = (
+                                    prefix + '$' + preprocessed + '$' + trail_ws
+                                )
+                line = ''.join(seg_parts)
 
             # Remove any orphan $ (unmatched single $)
             if line.count('$') % 2 != 0:
@@ -4636,7 +4738,15 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
             # Safety: fix any unmatched $ that slipped through
             for i, p in enumerate(parts):
                 if p.count('$') % 2 != 0:
-                    parts[i] = p.replace('$', '')
+                    # Convert math to Unicode instead of stripping $
+                    parts[i] = re.sub(
+                        r'\$([^$]+)\$',
+                        lambda m: _latex_to_plain(m.group(1)),
+                        p
+                    )
+                    # Remove any remaining orphan $
+                    if parts[i].count('$') % 2 != 0:
+                        parts[i] = parts[i].replace('$', '')
             return parts or [line]
 
         wrapped = []
@@ -4658,7 +4768,13 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
                 plt.close(test_fig)
             except Exception:
                 plt.close(test_fig)
-                wrapped[i] = ln.replace('$', '')
+                # Convert math blocks to readable Unicode instead of
+                # stripping $ and leaving raw LaTeX commands visible
+                wrapped[i] = re.sub(
+                    r'\$([^$]+)\$',
+                    lambda m: _latex_to_plain(m.group(1)),
+                    ln
+                )
 
         # Build figure with generous line spacing
         line_height = 0.7  # inches per line
