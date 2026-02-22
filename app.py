@@ -4545,23 +4545,40 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
             plt.rcParams['font.family'] = 'NanumGothic'
         plt.rcParams['mathtext.fontset'] = 'cm'
 
-        # Pull Korean characters out of $...$ math blocks
-        # (matplotlib's math font doesn't have Korean glyphs)
-        hangul_re = re.compile(r'[\uAC00-\uD7AF\u3131-\u318E\u1100-\u11FF]+')
+        # Sanitize text so Korean characters never appear inside $...$ math mode
+        # (matplotlib's math font 'rm'/Computer Modern has no Korean glyphs)
+        hangul_pattern = re.compile(r'[\uAC00-\uD7AF\u3131-\u318E\u1100-\u11FF]')
 
-        def fix_math_block(m):
-            math_content = m.group(1)
-            if not hangul_re.search(math_content):
-                return m.group(0)
-            parts = hangul_re.split(math_content)
-            korean_parts = hangul_re.findall(math_content)
-            result = ''
-            for i, part in enumerate(parts):
-                if part.strip():
-                    result += '$' + part + '$'
-                if i < len(korean_parts):
-                    result += korean_parts[i]
-            return result
+        def sanitize_line(line):
+            """Rebuild line so Korean chars are always outside $ delimiters."""
+            # First convert $$...$$ to $...$
+            line = line.replace('$$', '$')
+
+            # Find all $...$ math blocks and fix them
+            def fix_block(m):
+                content = m.group(1)
+                if not hangul_pattern.search(content):
+                    return m.group(0)  # Pure math, keep as-is
+                # Split by Korean chars, wrap only non-Korean in $
+                sub_parts = re.split(r'([\uAC00-\uD7AF\u3131-\u318E\u1100-\u11FF]+)', content)
+                result = ''
+                for sp in sub_parts:
+                    if not sp:
+                        continue
+                    if hangul_pattern.search(sp):
+                        result += sp
+                    elif sp.strip():
+                        result += '$' + sp + '$'
+                    else:
+                        result += sp
+                return result
+
+            line = re.sub(r'\$([^$]+)\$', fix_block, line)
+
+            # Remove any orphan $ (unmatched single $)
+            if line.count('$') % 2 != 0:
+                line = line.replace('$', '')
+            return line
 
         lines = text.split('\n')
 
@@ -4579,7 +4596,7 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
             if line.strip() == '':
                 y -= step * 0.5
                 continue
-            line = re.sub(r'\$([^$]+)\$', fix_math_block, line)
+            line = sanitize_line(line)
             ax.text(0.02, y, line, fontsize=font_size, va='top', ha='left',
                     transform=ax.transAxes, wrap=True)
             y -= step
