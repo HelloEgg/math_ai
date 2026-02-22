@@ -4610,8 +4610,8 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
     Render text (Korean + LaTeX math) onto a white PIL image.
 
     Uses HTML + KaTeX + Playwright for accurate LaTeX rendering with full
-    Korean text support. Falls back to a simple Pillow-based renderer if
-    Playwright is unavailable.
+    Korean text support. Falls back to matplotlib (good math rendering) then
+    to plain Pillow text if neither is available.
 
     Args:
         text: Text that may contain LaTeX notation (inline $...$ or $$...$$)
@@ -4622,13 +4622,18 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
     Returns:
         PIL Image or None if failed
     """
-    # Try the KaTeX + Playwright renderer first
+    # Try the KaTeX + Playwright renderer first (best quality)
     img = _render_text_to_image_katex(text, font_size, max_width, padding)
     if img is not None:
         return img
 
-    # Fallback: simple Pillow text rendering (no math formatting)
-    print("render_text_to_image: KaTeX renderer unavailable, using Pillow fallback")
+    # Fallback: matplotlib renderer (good math, good Korean text)
+    img = _render_text_to_image_matplotlib(text, font_size, max_width, padding)
+    if img is not None:
+        return img
+
+    # Last resort: plain Pillow text rendering (no math formatting)
+    print("render_text_to_image: KaTeX and matplotlib unavailable, using Pillow fallback")
     return _render_text_to_image_pillow_fallback(text, font_size, max_width, padding)
 
 
@@ -4746,6 +4751,85 @@ renderMathInElement(document.body, {{
 
     except Exception as e:
         print(f"_render_text_to_image_katex failed: {e}")
+        return None
+
+
+def _render_text_to_image_matplotlib(text, font_size=16, max_width=1200, padding=40):
+    """Render text with LaTeX math using matplotlib (no browser needed)."""
+    if getattr(_render_text_to_image_matplotlib, '_failed', False):
+        return None
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import matplotlib.font_manager as fm
+
+        # Register Korean font if not done yet
+        if not getattr(_render_text_to_image_matplotlib, '_font_ready', False):
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+            font_path = os.path.join(app_dir, 'fonts', 'NanumGothic.ttf')
+            if os.path.isfile(font_path):
+                fm.fontManager.addfont(font_path)
+                prop = fm.FontProperties(fname=font_path)
+                plt.rcParams['font.family'] = prop.get_name()
+            plt.rcParams['mathtext.fontset'] = 'cm'
+            _render_text_to_image_matplotlib._font_ready = True
+
+        lines = text.split('\n')
+        # Estimate figure height from line count
+        line_height_inches = (font_size / 72) * 1.8
+        fig_width = max_width / 150  # at 150 dpi
+        fig_height = max(1.0, len(lines) * line_height_inches + (padding * 2) / 150)
+
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis('off')
+
+        mpl_fontsize = max(10, font_size * 0.55)
+        x_start = padding / max_width
+        y = 1.0 - (padding / (fig_height * 150))
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped:
+                # matplotlib uses $...$ for all math; convert $$...$$ to $...$
+                stripped = stripped.replace('$$', '$')
+                ax.text(x_start, y, stripped, fontsize=mpl_fontsize, va='top',
+                        transform=ax.transAxes, wrap=True)
+            y -= line_height_inches / fig_height
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight', dpi=150,
+                    facecolor='white', edgecolor='none')
+        plt.close(fig)
+        buf.seek(0)
+        img = Image.open(buf).convert('RGB')
+
+        # Crop trailing whitespace
+        img_array = img.load()
+        w, h = img.size
+        bottom = h - 1
+        for y_pos in range(h - 1, 0, -1):
+            row_has_content = False
+            for x_pos in range(0, w, 4):
+                r, g, b = img_array[x_pos, y_pos]
+                if r < 250 or g < 250 or b < 250:
+                    row_has_content = True
+                    break
+            if row_has_content:
+                bottom = min(y_pos + padding, h)
+                break
+        if bottom < h - 10:
+            img = img.crop((0, 0, w, bottom))
+
+        return img
+
+    except ImportError:
+        _render_text_to_image_matplotlib._failed = True
+        return None
+    except Exception as e:
+        print(f"_render_text_to_image_matplotlib failed: {e}")
         return None
 
 
