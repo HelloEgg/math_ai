@@ -4606,12 +4606,12 @@ def pdf_extract():
     """
     Extract individual questions from a PDF, solve each, and return structured results.
 
-    Pipeline (no image generation API calls):
+    Pipeline:
       1. Convert PDF pages to images (PyMuPDF)
-      2. Gemini parses questions + identifies page/position for cropping
-      3. Crop each question from page images
-      4. Solve each question with Gemini
-      5. Render solution text as image (PIL) and concatenate with question image
+      2. Gemini parses questions: text, diagram bounding boxes, choices
+      3. Build question image: rendered text + cropped diagram(s) + rendered choices
+      4. Solve each question
+      5. Build answer image: question image + divider + rendered solution
 
     Input: multipart/form-data with 'pdf' file
     Output: JSON array
@@ -4638,23 +4638,22 @@ def pdf_extract():
     base_url = request.host_url.rstrip('/')
 
     try:
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
 
         # === Step 1: Convert PDF pages to images ===
         print(f"PDF Extract: Converting PDF to images ({len(pdf_data)} bytes)...")
-        doc = fitz.open(stream=pdf_data, filetype="pdf")
+        doc = pymupdf.open(stream=pdf_data, filetype="pdf")
         page_images = []
         for page_num in range(len(doc)):
             page = doc[page_num]
-            # Render at 2x for good quality
-            mat = fitz.Matrix(2.0, 2.0)
+            mat = pymupdf.Matrix(2.0, 2.0)
             pix = page.get_pixmap(matrix=mat)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             page_images.append(img)
             print(f"  Page {page_num+1}: {pix.width}x{pix.height}")
         doc.close()
 
-        # === Step 2: Parse questions with Gemini (include page & position) ===
+        # === Step 2: Parse questions with Gemini ===
         print("PDF Extract: Parsing questions with Gemini...")
 
         genai.configure(api_key=api_key)
@@ -4663,32 +4662,39 @@ def pdf_extract():
         parse_prompt = f"""이 PDF에서 개별 문제를 모두 추출해주세요.
 이 PDF는 총 {len(page_images)}페이지입니다.
 
-각 문제에 대해 다음을 정확히 추출하세요:
-1. 문제 번호
-2. 문제 전체 텍스트 (LaTeX 수식 포함, 한국어)
-3. 객관식이면 선택지 포함
-4. 문제가 있는 페이지 번호 (1부터 시작)
-5. 문제가 페이지에서 시작하는 위치 (0.0=맨위, 1.0=맨아래)
-6. 문제가 페이지에서 끝나는 위치 (0.0=맨위, 1.0=맨아래)
-   - 문제가 여러 페이지에 걸치면 end_page와 end_position도 지정
+각 문제에 대해 3가지를 추출하세요:
+1. question_text: 문제 텍스트 (LaTeX 수식 포함, 한국어). 선택지는 여기에 포함하지 마세요.
+2. diagrams: 문제에 포함된 그림/도형/그래프의 위치 (bounding box). 텍스트가 아닌 순수 이미지/도형 영역만.
+3. choices: 객관식 선택지 (있는 경우만)
+
+★ diagrams의 bounding box는 해당 페이지 이미지 기준 비율 좌표입니다:
+  - x_min, y_min: 좌상단 (0.0~1.0)
+  - x_max, y_max: 우하단 (0.0~1.0)
+  - 그림이 여러 개면 각각의 bounding box를 별도로
+  - 그림이 없으면 빈 배열 []
 
 JSON 배열로만 응답하세요:
 [
     {{
         "question_number": 1,
-        "question_text": "문제 전체 텍스트 (LaTeX, 한국어, 선택지 포함)",
+        "question_text": "문제 텍스트 (LaTeX, 한국어). 선택지 제외",
         "is_mcq": true,
         "choices": ["① 값1", "② 값2", "③ 값3", "④ 값4", "⑤ 값5"],
-        "page": 1,
-        "start_position": 0.0,
-        "end_position": 0.5,
-        "end_page": 1
+        "diagrams": [
+            {{
+                "page": 1,
+                "x_min": 0.1,
+                "y_min": 0.3,
+                "x_max": 0.9,
+                "y_max": 0.6
+            }}
+        ]
     }}
 ]
 
 ★ page는 1부터 시작합니다
-★ start_position, end_position은 해당 페이지의 세로 위치 비율 (0.0~1.0)
-★ 문제가 한 페이지 안에 있으면 end_page는 page와 같게"""
+★ diagrams에는 텍스트 영역을 포함하지 마세요. 순수 그림/도형/그래프 영역만 포함하세요.
+★ 그림이 없는 문제는 diagrams를 빈 배열 []로"""
 
         pdf_part = {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode('utf-8')}
         parsed = gemini_generate_json(model, [parse_prompt, pdf_part], context="pdf_extract parse")
@@ -4698,7 +4704,7 @@ JSON 배열로만 응답하세요:
 
         print(f"PDF Extract: Found {len(parsed)} questions")
 
-        # === Step 3 & 4: Crop questions, solve, render solution images ===
+        # === Step 3 & 4: Build question images, solve, build answer images ===
         results = []
 
         for q in parsed:
@@ -4706,57 +4712,67 @@ JSON 배열로만 응답하세요:
             q_text = q.get('question_text', '')
             is_mcq = q.get('is_mcq', False)
             choices = q.get('choices', [])
-            page = q.get('page', 1)
-            start_pos = q.get('start_position', 0.0)
-            end_pos = q.get('end_position', 1.0)
-            end_page = q.get('end_page', page)
+            diagrams = q.get('diagrams', [])
 
-            print(f"  Q{q_num}: page={page}, pos={start_pos:.2f}-{end_pos:.2f}, end_page={end_page}")
+            print(f"  Q{q_num}: {len(diagrams)} diagram(s), is_mcq={is_mcq}")
 
             try:
-                # --- Crop question image from PDF page(s) ---
-                question_image_url = None
+                # --- Part 1: Render question text ---
+                text_img = render_text_to_image(q_text, font_size=30)
+
+                # --- Part 2: Crop diagram(s) from PDF page images ---
+                diagram_imgs = []
+                for d in diagrams:
+                    try:
+                        d_page = d.get('page', 1)
+                        page_idx = max(0, min(d_page - 1, len(page_images) - 1))
+                        src_img = page_images[page_idx]
+                        w, h = src_img.size
+
+                        x1 = max(0, int(w * d.get('x_min', 0)))
+                        y1 = max(0, int(h * d.get('y_min', 0)))
+                        x2 = min(w, int(w * d.get('x_max', 1)))
+                        y2 = min(h, int(h * d.get('y_max', 1)))
+
+                        if x2 > x1 and y2 > y1:
+                            cropped = src_img.crop((x1, y1, x2, y2))
+                            diagram_imgs.append(cropped)
+                            print(f"  Q{q_num}: Cropped diagram from page {d_page} ({x2-x1}x{y2-y1})")
+                    except Exception as e:
+                        print(f"  Q{q_num}: Warning: Diagram crop failed: {e}")
+
+                # --- Part 3: Render choices ---
+                choices_img = None
+                if choices:
+                    choices_text = '\n'.join(choices)
+                    choices_img = render_text_to_image(choices_text, font_size=28)
+
+                # --- Assemble question image: text + diagrams + choices ---
+                parts = []
+                if text_img:
+                    parts.append(text_img)
+                for di in diagram_imgs:
+                    parts.append(di)
+                if choices_img:
+                    parts.append(choices_img)
+
                 question_img = None
-                try:
-                    page_idx = max(0, min(page - 1, len(page_images) - 1))
-                    end_page_idx = max(0, min(end_page - 1, len(page_images) - 1))
-                    src_img = page_images[page_idx]
-                    w, h = src_img.size
+                question_image_url = None
+                if parts:
+                    max_w = max(p.size[0] for p in parts)
+                    spacing = 16
+                    total_h = sum(p.size[1] for p in parts) + spacing * (len(parts) - 1)
+                    question_img = Image.new('RGB', (max_w, total_h), 'white')
+                    y_off = 0
+                    for p in parts:
+                        question_img.paste(p, (0, y_off))
+                        y_off += p.size[1] + spacing
 
-                    # Add margin around the crop
-                    margin = int(h * 0.02)
-                    top = max(0, int(h * start_pos) - margin)
-                    bottom = min(h, int(h * end_pos) + margin)
-
-                    if end_page_idx == page_idx:
-                        # Single page crop
-                        question_img = src_img.crop((0, top, w, bottom))
-                    else:
-                        # Multi-page: crop from start page + full intermediate pages + end page
-                        parts = [src_img.crop((0, top, w, h))]
-                        for mid_idx in range(page_idx + 1, end_page_idx):
-                            parts.append(page_images[mid_idx])
-                        end_img = page_images[end_page_idx]
-                        end_bottom = min(end_img.size[1], int(end_img.size[1] * end_pos) + margin)
-                        parts.append(end_img.crop((0, 0, end_img.size[0], end_bottom)))
-                        # Concatenate vertically
-                        total_h = sum(p.size[1] for p in parts)
-                        max_w = max(p.size[0] for p in parts)
-                        question_img = Image.new('RGB', (max_w, total_h), 'white')
-                        y_offset = 0
-                        for p in parts:
-                            question_img.paste(p, (0, y_offset))
-                            y_offset += p.size[1]
-
-                    # Save question image
                     q_uuid = str(uuid.uuid4())
                     q_path = os.path.join(app.config['IMAGE_FOLDER_PDF'], f"{q_uuid}.png")
                     question_img.save(q_path, 'PNG')
                     question_image_url = f"{base_url}/pdf_extract/images/{q_uuid}"
                     print(f"  Q{q_num}: Saved question image ({question_img.size[0]}x{question_img.size[1]})")
-
-                except Exception as e:
-                    print(f"  Q{q_num}: Warning: Question crop failed: {e}")
 
                 # --- Solve ---
                 print(f"  Q{q_num}: Solving...")
@@ -4773,7 +4789,17 @@ JSON 배열로만 응답하세요:
 JSON으로만 응답하세요:
 {{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답"}}"""
 
-                solve_result = gemini_generate_json(model, solve_prompt, context=f"pdf_extract solve Q{q_num}")
+                solve_parts = [solve_prompt]
+                # Include diagram images in solve request for visual context
+                for di in diagram_imgs:
+                    buf = io.BytesIO()
+                    di.save(buf, format='PNG')
+                    solve_parts.append({
+                        "mime_type": "image/png",
+                        "data": base64.b64encode(buf.getvalue()).decode('utf-8')
+                    })
+
+                solve_result = gemini_generate_json(model, solve_parts, context=f"pdf_extract solve Q{q_num}")
                 solution_text = solve_result.get('solution', '')
                 answer = solve_result.get('answer', '')
                 print(f"  Q{q_num}: Answer = {answer}")
@@ -4785,25 +4811,23 @@ JSON으로만 응답하세요:
                     except (ValueError, TypeError):
                         answer_number = answer
 
-                # --- Render solution as image (PIL) and concatenate with question ---
+                # --- Build answer image: question + divider + solution ---
                 answer_image_url = None
                 try:
-                    solution_img = render_text_to_image(solution_text)
+                    solution_img = render_text_to_image(solution_text, font_size=28)
                     if question_img and solution_img:
-                        # Concatenate: question on top, solution below with divider
                         q_w, q_h = question_img.size
                         s_w, s_h = solution_img.size
                         combined_w = max(q_w, s_w)
-                        divider_h = 4
                         padding = 20
-                        combined_h = q_h + divider_h + padding + s_h
+                        combined_h = q_h + padding + 4 + padding + s_h
                         combined = Image.new('RGB', (combined_w, combined_h), 'white')
                         combined.paste(question_img, (0, 0))
-                        # Draw divider line
                         draw = ImageDraw.Draw(combined)
-                        draw.line([(20, q_h + padding // 2), (combined_w - 20, q_h + padding // 2)],
+                        divider_y = q_h + padding
+                        draw.line([(20, divider_y), (combined_w - 20, divider_y)],
                                   fill='gray', width=2)
-                        combined.paste(solution_img, (0, q_h + divider_h + padding))
+                        combined.paste(solution_img, (0, q_h + padding + 4 + padding))
                         final_img = combined
                     elif solution_img:
                         final_img = solution_img
