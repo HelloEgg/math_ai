@@ -4547,41 +4547,44 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
 
         # Sanitize text so Korean characters never appear inside $...$ math mode
         # (matplotlib's math font 'rm'/Computer Modern has no Korean glyphs)
-        # Covers: Hangul syllables, jamo, circled Hangul (㉠㉡...), enclosed CJK
         korean_re = re.compile(
             r'[\uAC00-\uD7AF\u3131-\u318E\u1100-\u11FF'
             r'\u3200-\u321E\u3260-\u327F\uFFA0-\uFFDC]'
         )
+        # Common LaTeX commands → Unicode for plain-text fallback
+        _latex_unicode = [
+            (r'\times', '×'), (r'\cdot', '·'), (r'\pm', '±'),
+            (r'\rightarrow', '→'), (r'\leftarrow', '←'),
+            (r'\Rightarrow', '⇒'), (r'\Leftarrow', '⇐'),
+            (r'\leq', '≤'), (r'\geq', '≥'), (r'\neq', '≠'),
+            (r'\approx', '≈'), (r'\infty', '∞'),
+            (r'\alpha', 'α'), (r'\beta', 'β'), (r'\gamma', 'γ'),
+            (r'\delta', 'δ'), (r'\theta', 'θ'), (r'\lambda', 'λ'),
+            (r'\pi', 'π'), (r'\sigma', 'σ'), (r'\omega', 'ω'),
+        ]
+
+        def _latex_to_plain(s):
+            """Convert a LaTeX math string to readable plain text."""
+            for cmd, uni in _latex_unicode:
+                s = s.replace(cmd, uni)
+            s = re.sub(r'\\text\{([^}]*)\}', r'\1', s)   # \text{abc} → abc
+            s = re.sub(r'\\[a-zA-Z]+', '', s)             # remove remaining commands
+            s = s.replace('{', '').replace('}', '')        # remove braces
+            return s
 
         def sanitize_line(line):
             """Rebuild line so Korean chars are always outside $ delimiters."""
-            # Convert $$...$$ to $...$
             line = line.replace('$$', '$')
-            # Extract \text{Korean} from math and place outside $
+            # \text{Korean} outside math → just Korean
             line = re.sub(r'\\text\{([^}]*)\}', lambda m: m.group(1), line)
 
-            # Find all $...$ math blocks and fix them
             def fix_block(m):
                 content = m.group(1)
                 if not korean_re.search(content):
                     return m.group(0)  # Pure math, keep as-is
-                # Split by Korean chars, wrap only non-Korean parts in $
-                sub_parts = re.split(
-                    r'([\uAC00-\uD7AF\u3131-\u318E\u1100-\u11FF'
-                    r'\u3200-\u321E\u3260-\u327F\uFFA0-\uFFDC]+)',
-                    content
-                )
-                result = ''
-                for sp in sub_parts:
-                    if not sp:
-                        continue
-                    if korean_re.search(sp):
-                        result += sp
-                    elif sp.strip():
-                        result += '$' + sp + '$'
-                    else:
-                        result += sp
-                return result
+                # Korean in math → convert entire block to plain text
+                # (splitting produces broken LaTeX like $A_$ from $A_㉠$)
+                return _latex_to_plain(content)
 
             line = re.sub(r'\$([^$]+)\$', fix_block, line)
 
@@ -4601,29 +4604,37 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
         fig_height = max(1.0, len(lines) * line_height + 0.5)
         fig_width = max_width / 150  # convert px to inches at 150 dpi
 
-        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-        ax.axis('off')
-
-        y = 0.98
-        step = 1.0 / max(len(lines), 1) * 0.9
-        for line in lines:
-            if line.strip() == '':
-                y -= step * 0.5
-                continue
-            line = sanitize_line(line)
-            try:
-                ax.text(0.02, y, line, fontsize=font_size, va='top', ha='left',
+        def _build_figure(render_lines, use_math=True):
+            """Create figure with text lines. If use_math=False, strip all $."""
+            fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+            ax.axis('off')
+            y = 0.98
+            step = 1.0 / max(len(render_lines), 1) * 0.9
+            for ln in render_lines:
+                if ln.strip() == '':
+                    y -= step * 0.5
+                    continue
+                if not use_math:
+                    ln = ln.replace('$', '')
+                ax.text(0.02, y, ln, fontsize=font_size, va='top', ha='left',
                         transform=ax.transAxes, wrap=True)
-            except (ValueError, Exception):
-                # If matplotlib can't parse the math, strip all $ and render as plain text
-                plain = line.replace('$', '')
-                ax.text(0.02, y, plain, fontsize=font_size, va='top', ha='left',
-                        transform=ax.transAxes, wrap=True)
-            y -= step
+                y -= step
+            return fig
 
+        sanitized = [sanitize_line(l) for l in lines]
+
+        # Try rendering with math; if savefig fails, retry as plain text
+        fig = _build_figure(sanitized, use_math=True)
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
-                    facecolor='white', edgecolor='none', pad_inches=0.2)
+        try:
+            fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                        facecolor='white', edgecolor='none', pad_inches=0.2)
+        except Exception:
+            plt.close(fig)
+            buf = io.BytesIO()
+            fig = _build_figure(sanitized, use_math=False)
+            fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                        facecolor='white', edgecolor='none', pad_inches=0.2)
         plt.close(fig)
         buf.seek(0)
         img = Image.open(buf).convert('RGB')
