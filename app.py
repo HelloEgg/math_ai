@@ -4638,16 +4638,16 @@ def pdf_extract():
     base_url = request.host_url.rstrip('/')
 
     try:
-        import fitz  # PyMuPDF
+        import pymupdf  # PyMuPDF
 
         # === Step 1: Convert PDF pages to images ===
         print(f"PDF Extract: Converting PDF to images ({len(pdf_data)} bytes)...")
-        doc = fitz.open(stream=pdf_data, filetype="pdf")
+        doc = pymupdf.open(stream=pdf_data, filetype="pdf")
         page_images = []
         for page_num in range(len(doc)):
             page = doc[page_num]
             # Render at 2x for good quality
-            mat = fitz.Matrix(2.0, 2.0)
+            mat = pymupdf.Matrix(2.0, 2.0)
             pix = page.get_pixmap(matrix=mat)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             page_images.append(img)
