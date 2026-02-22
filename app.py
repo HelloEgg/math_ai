@@ -4518,174 +4518,246 @@ def get_pdf_extract_image(image_uuid):
     return send_file(image_path, mimetype='image/png')
 
 
+def _get_katex_assets():
+    """Load KaTeX CSS and JS from local katex/ directory (cached after first call)."""
+    if not hasattr(_get_katex_assets, '_cache'):
+        katex_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'katex')
+        css_path = os.path.join(katex_dir, 'katex.min.css')
+        js_path = os.path.join(katex_dir, 'katex.min.js')
+        ar_path = os.path.join(katex_dir, 'auto-render.min.js')
+        with open(css_path, 'r', encoding='utf-8') as f:
+            css = f.read()
+        with open(js_path, 'r', encoding='utf-8') as f:
+            js = f.read()
+        with open(ar_path, 'r', encoding='utf-8') as f:
+            ar = f.read()
+        # Fix font URLs in CSS: point to absolute paths for the local fonts
+        fonts_dir = os.path.join(katex_dir, 'fonts')
+        css = re.sub(
+            r'url\(fonts/',
+            f'url(file://{fonts_dir}/',
+            css,
+        )
+        _get_katex_assets._cache = (css, js, ar)
+    return _get_katex_assets._cache
+
+
+def _get_playwright_browser():
+    """Get or create a shared Playwright browser instance."""
+    if not hasattr(_get_playwright_browser, '_browser') or _get_playwright_browser._browser is None:
+        try:
+            from playwright.sync_api import sync_playwright
+            pw = sync_playwright().start()
+            _get_playwright_browser._pw = pw
+            # Find the chromium executable
+            chrome_path = None
+            pw_cache = os.path.expanduser('~/.cache/ms-playwright')
+            if os.path.isdir(pw_cache):
+                for entry in sorted(os.listdir(pw_cache), reverse=True):
+                    if entry.startswith('chromium-'):
+                        candidate = os.path.join(pw_cache, entry, 'chrome-linux', 'chrome')
+                        if os.path.isfile(candidate):
+                            chrome_path = candidate
+                            break
+            launch_args = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu',
+                           '--disable-dev-shm-usage', '--font-render-hinting=none']
+            if chrome_path:
+                browser = pw.chromium.launch(executable_path=chrome_path, args=launch_args)
+            else:
+                browser = pw.chromium.launch(args=launch_args)
+            _get_playwright_browser._browser = browser
+        except Exception as e:
+            print(f"Playwright browser launch failed: {e}")
+            _get_playwright_browser._browser = None
+    return _get_playwright_browser._browser
+
+
+def _escape_html(text):
+    """Escape HTML special characters while preserving LaTeX $ delimiters."""
+    text = text.replace('&', '&amp;')
+    text = text.replace('<', '&lt;')
+    text = text.replace('>', '&gt;')
+    return text
+
+
 def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
     """
-    Render text (Korean + LaTeX math) onto a white PIL image using matplotlib.
+    Render text (Korean + LaTeX math) onto a white PIL image.
+
+    Uses HTML + KaTeX + Playwright for accurate LaTeX rendering with full
+    Korean text support. Falls back to a simple Pillow-based renderer if
+    Playwright is unavailable.
 
     Args:
         text: Text that may contain LaTeX notation (inline $...$ or $$...$$)
-        font_size: Matplotlib font size
+        font_size: Base font size in pixels
         max_width: Maximum image width in pixels
-        padding: Padding around text
+        padding: Padding around text in pixels
 
     Returns:
         PIL Image or None if failed
     """
+    # Try the KaTeX + Playwright renderer first
+    img = _render_text_to_image_katex(text, font_size, max_width, padding)
+    if img is not None:
+        return img
+
+    # Fallback: simple Pillow text rendering (no math formatting)
+    print("render_text_to_image: KaTeX renderer unavailable, using Pillow fallback")
+    return _render_text_to_image_pillow_fallback(text, font_size, max_width, padding)
+
+
+def _render_text_to_image_katex(text, font_size=16, max_width=1200, padding=40):
+    """Render text with LaTeX math using HTML + KaTeX + Playwright."""
     try:
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        from matplotlib import font_manager
+        browser = _get_playwright_browser()
+        if browser is None:
+            return None
 
-        # Register Korean font
-        app_dir = os.path.dirname(os.path.abspath(__file__))
-        font_path = os.path.join(app_dir, 'fonts', 'NanumGothic.ttf')
-        if os.path.exists(font_path):
-            font_manager.fontManager.addfont(font_path)
-            plt.rcParams['font.family'] = 'NanumGothic'
-        plt.rcParams['mathtext.fontset'] = 'cm'
+        katex_css, katex_js, auto_render_js = _get_katex_assets()
 
-        # Sanitize text so Korean characters never appear inside $...$ math mode
-        # (matplotlib's math font 'rm'/Computer Modern has no Korean glyphs)
-        korean_re = re.compile(
-            r'[\uAC00-\uD7AF\u3131-\u318E\u1100-\u11FF'
-            r'\u3200-\u321E\u3260-\u327F\uFFA0-\uFFDC]'
-        )
-        # Common LaTeX commands → Unicode for plain-text fallback
-        _latex_unicode = [
-            (r'\times', '×'), (r'\cdot', '·'), (r'\pm', '±'),
-            (r'\rightarrow', '→'), (r'\leftarrow', '←'),
-            (r'\Rightarrow', '⇒'), (r'\Leftarrow', '⇐'),
-            (r'\leq', '≤'), (r'\geq', '≥'), (r'\neq', '≠'),
-            (r'\approx', '≈'), (r'\infty', '∞'),
-            (r'\alpha', 'α'), (r'\beta', 'β'), (r'\gamma', 'γ'),
-            (r'\delta', 'δ'), (r'\theta', 'θ'), (r'\lambda', 'λ'),
-            (r'\pi', 'π'), (r'\sigma', 'σ'), (r'\omega', 'ω'),
-        ]
-
-        def _latex_to_plain(s):
-            """Convert a LaTeX math string to readable plain text."""
-            for cmd, uni in _latex_unicode:
-                s = s.replace(cmd, uni)
-            s = re.sub(r'\\text\{([^}]*)\}', r'\1', s)         # \text{abc} → abc
-            s = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'(\1)/(\2)', s)
-            s = re.sub(r'\\sqrt\{([^}]*)\}', r'√(\1)', s)
-            s = re.sub(r'\\[a-zA-Z]+', '', s)                   # remove remaining commands
-            s = s.replace('{', '').replace('}', '')              # remove braces
-            s = re.sub(r'\s+', ' ', s).strip()                  # collapse whitespace
-            return s
-
-        def sanitize_line(line):
-            """Rebuild line so Korean chars are always outside $ delimiters."""
-            line = line.replace('$$', '$')
-            # \text{Korean} outside math → just Korean
-            line = re.sub(r'\\text\{([^}]*)\}', lambda m: m.group(1), line)
-
-            def fix_block(m):
-                content = m.group(1)
-                if not korean_re.search(content):
-                    return m.group(0)  # Pure math, keep as-is
-                # Korean in math → convert entire block to plain text
-                # (splitting produces broken LaTeX like $A_$ from $A_㉠$)
-                return _latex_to_plain(content)
-
-            line = re.sub(r'\$([^$]+)\$', fix_block, line)
-
-            # Remove any orphan $ (unmatched single $)
-            if line.count('$') % 2 != 0:
-                line = line.replace('$', '')
-            return line
-
-        import logging
-        logging.getLogger('matplotlib.mathtext').setLevel(logging.ERROR)
-        logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
-
+        # Convert text lines to HTML paragraphs, preserving $ delimiters for KaTeX
         lines = text.split('\n')
-
-        fig_width = max_width / 150  # convert px to inches at 150 dpi
-
-        # Sanitize FIRST (before wrapping) so Korean-containing math blocks
-        # are already plain text and won't be broken by line wrapping
-        sanitized = [sanitize_line(l) for l in lines]
-
-        # Pre-wrap long lines (matplotlib wrap=True overlaps subsequent lines)
-        char_width_pts = 0.55 * font_size
-        max_chars = max(20, int(0.94 * fig_width * 72 / char_width_pts))
-
-        def _soft_wrap(line):
-            """Wrap at word boundaries, keeping $...$ blocks intact."""
-            if len(line) <= max_chars:
-                return [line]
-            # Protect spaces inside $...$ so they aren't split points
-            _PH = '\x00'
-            protected = re.sub(
-                r'\$[^$]+\$',
-                lambda m: m.group(0).replace(' ', _PH),
-                line,
-            )
-            parts, cur = [], ''
-            for word in protected.split(' '):
-                test = (cur + ' ' + word).strip() if cur else word
-                if len(test) > max_chars and cur:
-                    parts.append(cur.replace(_PH, ' '))
-                    cur = word
-                else:
-                    cur = test
-            if cur:
-                parts.append(cur.replace(_PH, ' '))
-            # Safety: fix any unmatched $ that slipped through
-            for i, p in enumerate(parts):
-                if p.count('$') % 2 != 0:
-                    parts[i] = p.replace('$', '')
-            return parts or [line]
-
-        wrapped = []
-        for line in sanitized:
-            if line.strip() == '':
-                wrapped.append('')
+        html_body_parts = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                html_body_parts.append('<div class="spacer"></div>')
             else:
-                wrapped.extend(_soft_wrap(line))
+                html_body_parts.append(f'<p>{_escape_html(stripped)}</p>')
+        html_body = '\n'.join(html_body_parts)
 
-        # Per-line math validation: test each line individually
-        # so one bad line doesn't kill math rendering for the whole image
-        for i, ln in enumerate(wrapped):
-            if '$' not in ln:
-                continue
-            try:
-                test_fig, test_ax = plt.subplots(figsize=(1, 1))
-                test_ax.text(0, 0, ln, fontsize=font_size)
-                test_fig.savefig(io.BytesIO(), format='png')
-                plt.close(test_fig)
-            except Exception:
-                plt.close(test_fig)
-                wrapped[i] = ln.replace('$', '')
+        # Scale font size: the caller uses matplotlib-scale sizes (16-30),
+        # map to CSS px (slightly larger for readability)
+        css_font_size = max(16, int(font_size * 0.85))
 
-        # Build figure with generous line spacing
-        line_height = 0.7  # inches per line
-        fig_height = max(2.0, len(wrapped) * line_height + 0.8)
-        step = line_height / fig_height  # consistent physical spacing
+        html = f'''<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+{katex_css}
+body {{
+    font-family: 'Noto Sans KR', 'NanumGothic', 'Malgun Gothic', sans-serif;
+    font-size: {css_font_size}px;
+    line-height: 1.8;
+    padding: {padding}px;
+    background: white;
+    color: #222;
+    max-width: {max_width}px;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}}
+p {{
+    margin: 0 0 0.4em 0;
+}}
+.spacer {{
+    height: 0.5em;
+}}
+.katex {{
+    font-size: 1.1em;
+}}
+.katex-display {{
+    margin: 0.5em 0;
+}}
+</style>
+</head>
+<body>
+{html_body}
+<script>{katex_js}</script>
+<script>{auto_render_js}</script>
+<script>
+renderMathInElement(document.body, {{
+    delimiters: [
+        {{left: "$$", right: "$$", display: true}},
+        {{left: "$", right: "$", display: false}}
+    ],
+    throwOnError: false
+}});
+</script>
+</body>
+</html>'''
 
-        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-        ax.axis('off')
-        y = 1.0 - 0.3 / fig_height  # small top margin
-        for ln in wrapped:
-            if ln.strip() == '':
-                y -= step * 0.5
-                continue
-            ax.text(0.02, y, ln, fontsize=font_size, va='top', ha='left',
-                    transform=ax.transAxes)
-            y -= step
+        page = browser.new_page(viewport={'width': max_width, 'height': 600})
+        try:
+            page.set_content(html, wait_until='domcontentloaded')
+            page.wait_for_timeout(300)
 
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
-                    facecolor='white', edgecolor='none', pad_inches=0.3)
-        plt.close(fig)
-        buf.seek(0)
-        img = Image.open(buf).convert('RGB')
+            # Get actual content height and take a tight screenshot
+            body_box = page.evaluate('''() => {
+                const body = document.body;
+                const rect = body.getBoundingClientRect();
+                return {width: Math.ceil(rect.width), height: Math.ceil(rect.height)};
+            }''')
+
+            content_height = body_box['height'] + padding
+            page.set_viewport_size({'width': max_width, 'height': max(100, content_height)})
+
+            screenshot_bytes = page.screenshot(full_page=True)
+        finally:
+            page.close()
+
+        img = Image.open(io.BytesIO(screenshot_bytes)).convert('RGB')
+
+        # Crop to content (remove excess whitespace at bottom)
+        img_array = img.load()
+        w, h = img.size
+        # Find last non-white row
+        bottom = h - 1
+        for y_pos in range(h - 1, 0, -1):
+            row_has_content = False
+            for x_pos in range(0, w, 4):  # sample every 4th pixel for speed
+                r, g, b = img_array[x_pos, y_pos]
+                if r < 250 or g < 250 or b < 250:
+                    row_has_content = True
+                    break
+            if row_has_content:
+                bottom = min(y_pos + padding, h)
+                break
+        if bottom < h - 10:
+            img = img.crop((0, 0, w, bottom))
+
         return img
 
     except Exception as e:
-        print(f"render_text_to_image failed: {e}")
+        print(f"_render_text_to_image_katex failed: {e}")
+        return None
+
+
+def _render_text_to_image_pillow_fallback(text, font_size=16, max_width=1200, padding=40):
+    """Simple Pillow-based text rendering fallback (no math formatting)."""
+    try:
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        font_path = os.path.join(app_dir, 'fonts', 'NanumGothic.ttf')
+        try:
+            font = ImageFont.truetype(font_path, size=font_size)
+        except Exception:
+            font = ImageFont.load_default()
+
+        # Strip LaTeX dollar signs for plain text display
+        plain = text.replace('$$', '').replace('$', '')
+        plain = re.sub(r'\\text\{([^}]*)\}', r'\1', plain)
+        plain = re.sub(r'\\[a-zA-Z]+', ' ', plain)
+        plain = plain.replace('{', '').replace('}', '')
+
+        lines = plain.split('\n')
+        line_height = font_size + 8
+        img_height = max(100, len(lines) * line_height + padding * 2)
+        img = Image.new('RGB', (max_width, img_height), 'white')
+        draw = ImageDraw.Draw(img)
+
+        y = padding
+        for line in lines:
+            if line.strip():
+                draw.text((padding, y), line.strip(), fill='black', font=font)
+            y += line_height
+
+        # Crop to content height
+        img = img.crop((0, 0, max_width, min(y + padding, img_height)))
+        return img
+
+    except Exception as e:
+        print(f"_render_text_to_image_pillow_fallback failed: {e}")
         return None
 
 
