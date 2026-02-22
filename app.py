@@ -4590,8 +4590,9 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
                 line = line.replace('$', '')
             return line
 
-        import warnings
-        warnings.filterwarnings('ignore', message=".*does not have a glyph.*")
+        import logging
+        logging.getLogger('matplotlib.mathtext').setLevel(logging.ERROR)
+        logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
 
         lines = text.split('\n')
 
