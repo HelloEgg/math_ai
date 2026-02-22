@@ -4754,8 +4754,68 @@ renderMathInElement(document.body, {{
         return None
 
 
+def _normalize_latex_for_matplotlib(s):
+    """Convert LaTeX commands unsupported by matplotlib to equivalents."""
+    import re as _re
+    fixes = [
+        (r'\ge', r'\geq'), (r'\le', r'\leq'), (r'\ne', r'\neq'),
+        (r'\iff', r'\Leftrightarrow'), (r'\implies', r'\Rightarrow'),
+        (r'\land', r'\wedge'), (r'\lor', r'\vee'),
+        (r'\N', r'\mathbb{N}'), (r'\Z', r'\mathbb{Z}'),
+        (r'\R', r'\mathbb{R}'), (r'\Q', r'\mathbb{Q}'),
+    ]
+    for old, new in fixes:
+        # Use lambda replacement to avoid re interpreting \g as group ref
+        s = _re.sub(_re.escape(old) + r'(?![a-zA-Z])', lambda m: new, s)
+    # Handle \text{...} -> \mathrm{...} (matplotlib supports \mathrm)
+    s = s.replace(r'\text{', r'\mathrm{')
+    return s
+
+
+def _render_math_to_image(latex_str, font_size_pt):
+    """Render a single LaTeX math expression to a tight PIL Image."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import warnings as _warnings
+    import numpy as np
+
+    latex_str = _normalize_latex_for_matplotlib(latex_str)
+    with _warnings.catch_warnings():
+        _warnings.simplefilter('ignore')
+        fig = plt.figure(figsize=(10, 0.8))
+        fig.patch.set_facecolor('white')
+        fig.text(0.0, 0.5, f'${latex_str}$',
+                 fontsize=font_size_pt * 0.65, va='center', ha='left')
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=150, facecolor='white',
+                    bbox_inches='tight', pad_inches=0.02)
+        plt.close(fig)
+        buf.seek(0)
+        img = Image.open(buf).convert('RGB')
+        # Auto-crop whitespace
+        arr = np.array(img)
+        non_white = np.where(arr < 245)
+        if len(non_white[0]) > 0:
+            top = max(0, non_white[0].min() - 2)
+            bottom = min(img.height, non_white[0].max() + 3)
+            left = max(0, non_white[1].min() - 2)
+            right = min(img.width, non_white[1].max() + 3)
+            img = img.crop((left, top, right, bottom))
+        return img
+
+
+# Regex to split text into plain-text and $...$ / $$...$$ math segments
+_MATH_SEGMENT_RE = re.compile(r'(\$\$[\s\S]*?\$\$|\$(?:[^$\\]|\\.)*?\$)')
+
+
 def _render_text_to_image_matplotlib(text, font_size=16, max_width=1200, padding=40):
-    """Render text with LaTeX math using matplotlib (no browser needed)."""
+    """Hybrid renderer: Pillow for Korean text, matplotlib for math expressions.
+
+    Splits each line into plain-text and $...$ segments, renders math with
+    matplotlib (which supports proper fractions, square roots, etc.) and
+    Korean text with Pillow + NanumGothic.  No browser required.
+    """
     if getattr(_render_text_to_image_matplotlib, '_failed', False):
         return None
     try:
@@ -4764,65 +4824,96 @@ def _render_text_to_image_matplotlib(text, font_size=16, max_width=1200, padding
         import matplotlib.pyplot as plt
         import matplotlib.font_manager as fm
 
-        # Register Korean font if not done yet
+        # One-time Korean font registration for matplotlib
         if not getattr(_render_text_to_image_matplotlib, '_font_ready', False):
             app_dir = os.path.dirname(os.path.abspath(__file__))
-            font_path = os.path.join(app_dir, 'fonts', 'NanumGothic.ttf')
-            if os.path.isfile(font_path):
-                fm.fontManager.addfont(font_path)
-                prop = fm.FontProperties(fname=font_path)
+            _mpl_font_path = os.path.join(app_dir, 'fonts', 'NanumGothic.ttf')
+            if os.path.isfile(_mpl_font_path):
+                fm.fontManager.addfont(_mpl_font_path)
+                prop = fm.FontProperties(fname=_mpl_font_path)
                 plt.rcParams['font.family'] = prop.get_name()
             plt.rcParams['mathtext.fontset'] = 'cm'
             _render_text_to_image_matplotlib._font_ready = True
 
+        # Pillow font for Korean text segments
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        font_path = os.path.join(app_dir, 'fonts', 'NanumGothic.ttf')
+        try:
+            pil_font = ImageFont.truetype(font_path, size=font_size)
+        except Exception:
+            pil_font = ImageFont.load_default()
+
+        line_height = int(font_size * 1.8)
         lines = text.split('\n')
-        # Estimate figure height from line count
-        line_height_inches = (font_size / 72) * 1.8
-        fig_width = max_width / 150  # at 150 dpi
-        fig_height = max(1.0, len(lines) * line_height_inches + (padding * 2) / 150)
 
-        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.axis('off')
-
-        mpl_fontsize = max(10, font_size * 0.55)
-        x_start = padding / max_width
-        y = 1.0 - (padding / (fig_height * 150))
-
+        # First pass: build segment data for every line
+        rendered_lines = []  # list of ('spacer', h) or ('segments', [...], h)
         for line in lines:
             stripped = line.strip()
-            if stripped:
-                # matplotlib uses $...$ for all math; convert $$...$$ to $...$
-                stripped = stripped.replace('$$', '$')
-                ax.text(x_start, y, stripped, fontsize=mpl_fontsize, va='top',
-                        transform=ax.transAxes, wrap=True)
-            y -= line_height_inches / fig_height
+            if not stripped:
+                rendered_lines.append(('spacer', int(font_size * 0.6)))
+                continue
 
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight', dpi=150,
-                    facecolor='white', edgecolor='none')
-        plt.close(fig)
-        buf.seek(0)
-        img = Image.open(buf).convert('RGB')
+            segments = _MATH_SEGMENT_RE.split(stripped)
+            seg_renders = []  # ('text', str) or ('math', PIL.Image)
+            line_h = line_height
 
-        # Crop trailing whitespace
-        img_array = img.load()
-        w, h = img.size
-        bottom = h - 1
-        for y_pos in range(h - 1, 0, -1):
-            row_has_content = False
-            for x_pos in range(0, w, 4):
-                r, g, b = img_array[x_pos, y_pos]
-                if r < 250 or g < 250 or b < 250:
-                    row_has_content = True
-                    break
-            if row_has_content:
-                bottom = min(y_pos + padding, h)
-                break
-        if bottom < h - 10:
-            img = img.crop((0, 0, w, bottom))
+            for seg in segments:
+                if not seg:
+                    continue
+                is_math = (
+                    (seg.startswith('$$') and seg.endswith('$$')) or
+                    (seg.startswith('$') and seg.endswith('$')
+                     and not seg.startswith('$$'))
+                )
+                if is_math:
+                    latex = seg.strip('$')
+                    try:
+                        math_img = _render_math_to_image(latex, font_size)
+                        seg_renders.append(('math', math_img))
+                        line_h = max(line_h, math_img.height + 8)
+                    except Exception:
+                        # Math render failed – show raw text for this segment
+                        seg_renders.append(('text', seg))
+                else:
+                    seg_renders.append(('text', seg))
 
+            rendered_lines.append(('segments', seg_renders, line_h))
+
+        # Calculate total canvas height
+        total_height = padding * 2
+        for item in rendered_lines:
+            total_height += item[1] if item[0] == 'spacer' else item[2]
+
+        # Second pass: compose onto a Pillow canvas
+        img = Image.new('RGB', (max_width, total_height), 'white')
+        draw = ImageDraw.Draw(img)
+        y = padding
+
+        for item in rendered_lines:
+            if item[0] == 'spacer':
+                y += item[1]
+                continue
+
+            _, seg_renders, line_h = item
+            x = padding
+
+            for seg_type, content in seg_renders:
+                if seg_type == 'text':
+                    bbox = pil_font.getbbox(content)
+                    text_h = bbox[3] - bbox[1]
+                    text_y = y + (line_h - text_h) // 2
+                    draw.text((x, text_y), content, fill='black', font=pil_font)
+                    x += bbox[2] - bbox[0]
+                else:  # math image
+                    paste_y = y + (line_h - content.height) // 2
+                    img.paste(content, (x, max(0, paste_y)))
+                    x += content.width
+
+            y += line_h
+
+        # Crop to actual content
+        img = img.crop((0, 0, max_width, min(y + padding, total_height)))
         return img
 
     except ImportError:
