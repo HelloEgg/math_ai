@@ -4532,9 +4532,9 @@ def render_text_to_image(text, font_size=28, max_width=1200, padding=40):
         PIL Image or None if failed
     """
     try:
-        # Load Korean-compatible font (WenQuanYi Zen Hei supports Korean/CJK)
+        # Load Korean font (NanumGothic)
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc", font_size)
+            font = ImageFont.truetype("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", font_size)
         except Exception:
             font = ImageFont.load_default()
 
