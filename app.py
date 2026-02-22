@@ -4567,9 +4567,12 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
             """Convert a LaTeX math string to readable plain text."""
             for cmd, uni in _latex_unicode:
                 s = s.replace(cmd, uni)
-            s = re.sub(r'\\text\{([^}]*)\}', r'\1', s)   # \text{abc} → abc
-            s = re.sub(r'\\[a-zA-Z]+', '', s)             # remove remaining commands
-            s = s.replace('{', '').replace('}', '')        # remove braces
+            s = re.sub(r'\\text\{([^}]*)\}', r'\1', s)         # \text{abc} → abc
+            s = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'(\1)/(\2)', s)
+            s = re.sub(r'\\sqrt\{([^}]*)\}', r'√(\1)', s)
+            s = re.sub(r'\\[a-zA-Z]+', '', s)                   # remove remaining commands
+            s = s.replace('{', '').replace('}', '')              # remove braces
+            s = re.sub(r'\s+', ' ', s).strip()                  # collapse whitespace
             return s
 
         def sanitize_line(line):
@@ -4599,42 +4602,83 @@ def render_text_to_image(text, font_size=16, max_width=1200, padding=40):
 
         lines = text.split('\n')
 
-        # Calculate figure height based on line count
-        line_height = 0.4  # inches per line
-        fig_height = max(1.0, len(lines) * line_height + 0.5)
         fig_width = max_width / 150  # convert px to inches at 150 dpi
 
-        def _build_figure(render_lines, use_math=True):
-            """Create figure with text lines. If use_math=False, strip all $."""
-            fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-            ax.axis('off')
-            y = 0.98
-            step = 1.0 / max(len(render_lines), 1) * 0.9
-            for ln in render_lines:
-                if ln.strip() == '':
-                    y -= step * 0.5
-                    continue
-                if not use_math:
-                    ln = ln.replace('$', '')
-                ax.text(0.02, y, ln, fontsize=font_size, va='top', ha='left',
-                        transform=ax.transAxes, wrap=True)
-                y -= step
-            return fig
-
+        # Sanitize FIRST (before wrapping) so Korean-containing math blocks
+        # are already plain text and won't be broken by line wrapping
         sanitized = [sanitize_line(l) for l in lines]
 
-        # Try rendering with math; if savefig fails, retry as plain text
-        fig = _build_figure(sanitized, use_math=True)
+        # Pre-wrap long lines (matplotlib wrap=True overlaps subsequent lines)
+        char_width_pts = 0.55 * font_size
+        max_chars = max(20, int(0.94 * fig_width * 72 / char_width_pts))
+
+        def _soft_wrap(line):
+            """Wrap at word boundaries, keeping $...$ blocks intact."""
+            if len(line) <= max_chars:
+                return [line]
+            # Protect spaces inside $...$ so they aren't split points
+            _PH = '\x00'
+            protected = re.sub(
+                r'\$[^$]+\$',
+                lambda m: m.group(0).replace(' ', _PH),
+                line,
+            )
+            parts, cur = [], ''
+            for word in protected.split(' '):
+                test = (cur + ' ' + word).strip() if cur else word
+                if len(test) > max_chars and cur:
+                    parts.append(cur.replace(_PH, ' '))
+                    cur = word
+                else:
+                    cur = test
+            if cur:
+                parts.append(cur.replace(_PH, ' '))
+            # Safety: fix any unmatched $ that slipped through
+            for i, p in enumerate(parts):
+                if p.count('$') % 2 != 0:
+                    parts[i] = p.replace('$', '')
+            return parts or [line]
+
+        wrapped = []
+        for line in sanitized:
+            if line.strip() == '':
+                wrapped.append('')
+            else:
+                wrapped.extend(_soft_wrap(line))
+
+        # Per-line math validation: test each line individually
+        # so one bad line doesn't kill math rendering for the whole image
+        for i, ln in enumerate(wrapped):
+            if '$' not in ln:
+                continue
+            try:
+                test_fig, test_ax = plt.subplots(figsize=(1, 1))
+                test_ax.text(0, 0, ln, fontsize=font_size)
+                test_fig.savefig(io.BytesIO(), format='png')
+                plt.close(test_fig)
+            except Exception:
+                plt.close(test_fig)
+                wrapped[i] = ln.replace('$', '')
+
+        # Build figure with generous line spacing
+        line_height = 0.7  # inches per line
+        fig_height = max(2.0, len(wrapped) * line_height + 0.8)
+        step = line_height / fig_height  # consistent physical spacing
+
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+        ax.axis('off')
+        y = 1.0 - 0.3 / fig_height  # small top margin
+        for ln in wrapped:
+            if ln.strip() == '':
+                y -= step * 0.5
+                continue
+            ax.text(0.02, y, ln, fontsize=font_size, va='top', ha='left',
+                    transform=ax.transAxes)
+            y -= step
+
         buf = io.BytesIO()
-        try:
-            fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
-                        facecolor='white', edgecolor='none', pad_inches=0.2)
-        except Exception:
-            plt.close(fig)
-            buf = io.BytesIO()
-            fig = _build_figure(sanitized, use_math=False)
-            fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
-                        facecolor='white', edgecolor='none', pad_inches=0.2)
+        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight',
+                    facecolor='white', edgecolor='none', pad_inches=0.3)
         plt.close(fig)
         buf.seek(0)
         img = Image.open(buf).convert('RGB')
