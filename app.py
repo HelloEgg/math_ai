@@ -411,7 +411,7 @@ def calculate_latex_similarity(latex1, latex2):
     return SequenceMatcher(None, norm1, norm2).ratio()
 
 
-def find_similar_problem(latex_string, model_class, similarity_threshold=0.85):
+def find_similar_problem(latex_string, model_class, similarity_threshold=0.85, feature=None):
     """
     Find a problem with similar LaTeX content in the database.
 
@@ -419,6 +419,7 @@ def find_similar_problem(latex_string, model_class, similarity_threshold=0.85):
         latex_string: The LaTeX string to search for
         model_class: The database model class to search (MathProblem, MathProblemSummary, MathProblemDeep)
         similarity_threshold: Minimum similarity ratio to consider a match (default 0.85)
+        feature: If provided, only match problems with this exact feature value
 
     Returns:
         The matching problem record, or None if no match found
@@ -426,8 +427,11 @@ def find_similar_problem(latex_string, model_class, similarity_threshold=0.85):
     if not latex_string:
         return None
 
-    # Get all problems with latex_string
-    problems = model_class.query.filter(model_class.latex_string.isnot(None)).all()
+    # Get all problems with latex_string, optionally filtered by feature
+    query = model_class.query.filter(model_class.latex_string.isnot(None))
+    if feature is not None and hasattr(model_class, 'feature'):
+        query = query.filter(model_class.feature == feature)
+    problems = query.all()
 
     best_match = None
     best_similarity = 0.0
@@ -780,8 +784,10 @@ def search_problem_original():
 
     image_hash = compute_image_hash(image_data)
 
-    # Step 1: Try exact image hash match first (fastest)
-    problem = MathProblemOriginal.query.filter_by(image_hash=image_hash).first()
+    # Step 1: Try exact image hash + feature match first (fastest)
+    problem = MathProblemOriginal.query.filter_by(
+        image_hash=image_hash, feature=feature
+    ).first()
 
     if problem:
         return jsonify({
@@ -799,7 +805,10 @@ def search_problem_original():
         latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
 
         if latex_string:
-            similar_problem = find_similar_problem(latex_string, MathProblemOriginal, similarity_threshold=0.85)
+            similar_problem = find_similar_problem(
+                latex_string, MathProblemOriginal,
+                similarity_threshold=0.85, feature=feature
+            )
 
             if similar_problem:
                 similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
@@ -862,11 +871,13 @@ def register_problem_original():
 
     image_hash = compute_image_hash(image_data)
 
-    # Check if problem with same image already exists
-    existing = MathProblemOriginal.query.filter_by(image_hash=image_hash).first()
+    # Check if problem with same image + feature already exists
+    existing = MathProblemOriginal.query.filter_by(
+        image_hash=image_hash, feature=feature
+    ).first()
     if existing:
         return jsonify({
-            'error': 'An original problem with this exact image already exists',
+            'error': 'An original problem with this exact image and feature already exists',
             'existing_uuid': existing.id
         }), 409
 
