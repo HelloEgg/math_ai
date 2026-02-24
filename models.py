@@ -107,9 +107,12 @@ class MathProblemOriginal(db.Model):
     """Model for storing original math problems (image URL + solution + answer, no audio)."""
 
     __tablename__ = 'math_problems_original'
+    __table_args__ = (
+        db.UniqueConstraint('image_hash', 'feature', name='uq_original_hash_feature'),
+    )
 
     id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
-    image_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    image_hash = db.Column(db.String(64), nullable=False, index=True)
     image_url = db.Column(db.String(2048), nullable=False)  # Original image URL from client
     image_path = db.Column(db.String(512), nullable=True)   # Local cached copy
     solution_latex = db.Column(db.Text, nullable=False)
