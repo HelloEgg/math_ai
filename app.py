@@ -917,6 +917,210 @@ def register_problem_original():
 
 
 # =============================================================================
+# Grading Endpoint
+# =============================================================================
+
+@app.route('/grading', methods=['POST'])
+def grade_solution():
+    """
+    Grade a student's handwritten solution against a problem image.
+
+    Expects JSON body:
+    {
+        "problemId": "string",
+        "problemImage": "https://example.com/problem.png",
+        "solutionImage": "https://example.com/solution.png"
+    }
+
+    Returns: JSON with 5-step grading (total out of 100, scale of 5)
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No JSON data provided'}), 400
+
+    problem_id = data.get('problemId')
+    problem_image_url = data.get('problemImage')
+    solution_image_url = data.get('solutionImage')
+
+    if not problem_id:
+        return jsonify({'error': 'No problemId provided'}), 400
+    if not problem_image_url:
+        return jsonify({'error': 'No problemImage provided'}), 400
+    if not solution_image_url:
+        return jsonify({'error': 'No solutionImage provided'}), 400
+
+    api_key = app.config.get('GEMINI_API_KEY')
+    if not api_key:
+        return jsonify({'error': 'Gemini API key not configured'}), 500
+
+    # Download both images
+    problem_image_data = download_image_from_url(problem_image_url)
+    if not problem_image_data:
+        return jsonify({'error': 'Failed to download problem image'}), 400
+
+    solution_image_data = download_image_from_url(solution_image_url)
+    if not solution_image_data:
+        return jsonify({'error': 'Failed to download solution image'}), 400
+
+    # Determine MIME types
+    try:
+        prob_img = Image.open(io.BytesIO(problem_image_data))
+        prob_mime = f"image/{prob_img.format.lower()}" if prob_img.format else "image/png"
+    except Exception:
+        prob_mime = "image/png"
+
+    try:
+        sol_img = Image.open(io.BytesIO(solution_image_data))
+        sol_mime = f"image/{sol_img.format.lower()}" if sol_img.format else "image/png"
+    except Exception:
+        sol_mime = "image/png"
+
+    # Build image parts
+    problem_image_part = {
+        "mime_type": prob_mime,
+        "data": base64.b64encode(problem_image_data).decode('utf-8')
+    }
+    solution_image_part = {
+        "mime_type": sol_mime,
+        "data": base64.b64encode(solution_image_data).decode('utf-8')
+    }
+
+    prompt = """You are a strict and fair math teacher grading a student's solution.
+
+**[IMAGE 1]** is the PROBLEM.
+**[IMAGE 2]** is the STUDENT'S HANDWRITTEN SOLUTION.
+
+## Grading Rules
+- Total score is out of 100 points (use increments of 5 only: 0, 5, 10, ..., 95, 100).
+- Grade in exactly 5 steps. Each step's maxScore must be a multiple of 5 and all 5 maxScores must sum to exactly 100.
+- Each step's score must be a multiple of 5 and must be between 0 and that step's maxScore (inclusive).
+- All 5 step scores must sum to the totalScore.
+- **CRITICAL**: If the student's solution is for a DIFFERENT problem (irrelevant to the problem image), give totalScore = 0 and all step scores = 0.
+
+## The 5 Grading Steps
+
+**Step 1 – Problem Understanding (suggested max: 15)**
+Does the student correctly identify what the problem is asking? Did they set up the problem properly?
+
+**Step 2 – Approach & Strategy (suggested max: 20)**
+Did the student choose an appropriate method or formula? Is the overall strategy sound?
+
+**Step 3 – Calculation & Execution (suggested max: 30)**
+Are the computations correct? Are algebraic manipulations accurate?
+
+**Step 4 – Logical Reasoning & Justification (suggested max: 20)**
+Are the steps logically connected? Does each step follow from the previous one?
+
+**Step 5 – Final Answer & Presentation (suggested max: 15)**
+Is the final answer correct and clearly stated? Is the work organized and readable?
+
+## Response Format
+Respond ONLY with a valid JSON object (no markdown, no code fences). All string values must be in Korean. Use this exact structure:
+{
+  "totalScore": <number>,
+  "totalFeedback": "<overall feedback in Korean>",
+  "step1Score": <number>,
+  "step1MaxScore": <number>,
+  "step1Analysis": "<what the student did in this step, in Korean>",
+  "step1Strength": "<what was done well, in Korean>",
+  "step1Improvement": "<what could be improved, in Korean>",
+  "step1GradeTip": "<grading justification, in Korean>",
+  "step2Score": <number>,
+  "step2MaxScore": <number>,
+  "step2Analysis": "<in Korean>",
+  "step2Strength": "<in Korean>",
+  "step2Improvement": "<in Korean>",
+  "step2GradeTip": "<in Korean>",
+  "step3Score": <number>,
+  "step3MaxScore": <number>,
+  "step3Analysis": "<in Korean>",
+  "step3Strength": "<in Korean>",
+  "step3Improvement": "<in Korean>",
+  "step3GradeTip": "<in Korean>",
+  "step4Score": <number>,
+  "step4MaxScore": <number>,
+  "step4Analysis": "<in Korean>",
+  "step4Strength": "<in Korean>",
+  "step4Improvement": "<in Korean>",
+  "step4GradeTip": "<in Korean>",
+  "step5Score": <number>,
+  "step5MaxScore": <number>,
+  "step5Analysis": "<in Korean>",
+  "step5Strength": "<in Korean>",
+  "step5Improvement": "<in Korean>",
+  "step5GradeTip": "<in Korean>"
+}"""
+
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-3.1-pro-preview')
+
+        response = model.generate_content([
+            prompt,
+            "[IMAGE 1] Problem:",
+            problem_image_part,
+            "[IMAGE 2] Student's Solution:",
+            solution_image_part,
+        ])
+
+        raw_text = response.text.strip()
+
+        # Strip markdown code fences if present
+        if raw_text.startswith('```'):
+            raw_text = raw_text.split('\n', 1)[1] if '\n' in raw_text else raw_text[3:]
+        if raw_text.endswith('```'):
+            raw_text = raw_text[:-3].strip()
+        if raw_text.startswith('json'):
+            raw_text = raw_text[4:].strip()
+
+        result = json.loads(raw_text)
+
+        # Validate and sanitize scores
+        def clamp_score(val, max_val):
+            val = int(val) if val is not None else 0
+            val = max(0, min(val, max_val))
+            return (val // 5) * 5  # force multiple of 5
+
+        for i in range(1, 6):
+            max_key = f'step{i}MaxScore'
+            score_key = f'step{i}Score'
+            result.setdefault(max_key, [15, 20, 30, 20, 15][i - 1])
+            result[max_key] = max(5, (int(result[max_key]) // 5) * 5)
+            result[score_key] = clamp_score(result.get(score_key, 0), result[max_key])
+
+        # Ensure maxScores sum to 100
+        max_sum = sum(result[f'step{i}MaxScore'] for i in range(1, 6))
+        if max_sum != 100:
+            defaults = [15, 20, 30, 20, 15]
+            for i in range(1, 6):
+                result[f'step{i}MaxScore'] = defaults[i - 1]
+            for i in range(1, 6):
+                result[f'step{i}Score'] = clamp_score(
+                    result[f'step{i}Score'], result[f'step{i}MaxScore']
+                )
+
+        # Recompute totalScore from steps
+        result['totalScore'] = sum(result[f'step{i}Score'] for i in range(1, 6))
+        result['totalScore'] = (result['totalScore'] // 5) * 5
+
+        # Ensure all string fields exist
+        result.setdefault('totalFeedback', '')
+        for i in range(1, 6):
+            for suffix in ['Analysis', 'Strength', 'Improvement', 'GradeTip']:
+                result.setdefault(f'step{i}{suffix}', '')
+
+        result['problemId'] = problem_id
+        return jsonify(result)
+
+    except json.JSONDecodeError as e:
+        print(f"Grading JSON parse error: {e}\nRaw response: {raw_text[:500]}")
+        return jsonify({'error': 'Failed to parse grading response', 'detail': str(e)}), 500
+    except Exception as e:
+        print(f"Grading failed: {e}")
+        return jsonify({'error': 'Grading failed', 'detail': str(e)}), 500
+
+
+# =============================================================================
 # English Endpoints
 # =============================================================================
 
