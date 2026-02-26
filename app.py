@@ -91,6 +91,9 @@ def create_app(config_class=Config):
         # Migrate existing tables to add latex_string column if it doesn't exist
         migrate_add_latex_string_column(app)
 
+        # Fix unique constraint on math_problems_original
+        migrate_fix_original_unique_constraint(app)
+
     return app
 
 
@@ -161,6 +164,103 @@ def migrate_add_latex_string_column(app):
                 except Exception as e:
                     db.session.rollback()
                     print(f"  Warning: Could not add audio_path column to {table_name}: {e}")
+
+
+def migrate_fix_original_unique_constraint(app):
+    """
+    Fix the unique constraint on math_problems_original table.
+    Old schema had UNIQUE on image_hash alone, which prevented registering
+    the same image with different features. New schema uses UNIQUE on
+    (image_url, feature) so that different features for the same image
+    are treated as different problems.
+    """
+    from sqlalchemy import text, inspect
+
+    with app.app_context():
+        inspector = inspect(db.engine)
+
+        if 'math_problems_original' not in inspector.get_table_names():
+            return
+
+        # Check if the correct constraint already exists
+        unique_constraints = inspector.get_unique_constraints('math_problems_original')
+        for uc in unique_constraints:
+            if set(uc.get('column_names', [])) == {'image_url', 'feature'}:
+                return  # Already migrated
+
+        print("Migrating math_problems_original: updating unique constraint to (image_url, feature)...")
+
+        dialect = db.engine.dialect.name
+
+        if dialect == 'sqlite':
+            try:
+                # SQLite requires table recreation to change constraints
+                db.session.execute(text("""
+                    CREATE TABLE IF NOT EXISTS math_problems_original_new (
+                        id VARCHAR(36) PRIMARY KEY,
+                        image_hash VARCHAR(64) NOT NULL,
+                        image_url VARCHAR(2048) NOT NULL,
+                        image_path VARCHAR(512),
+                        solution_latex TEXT NOT NULL,
+                        answer TEXT,
+                        feature TEXT,
+                        latex_string TEXT,
+                        created_at DATETIME,
+                        updated_at DATETIME,
+                        CONSTRAINT uq_original_url_feature UNIQUE (image_url, feature)
+                    )
+                """))
+
+                db.session.execute(text("""
+                    INSERT OR IGNORE INTO math_problems_original_new
+                    SELECT id, image_hash, image_url, image_path, solution_latex,
+                           answer, feature, latex_string, created_at, updated_at
+                    FROM math_problems_original
+                """))
+
+                db.session.execute(text("DROP TABLE math_problems_original"))
+                db.session.execute(text(
+                    "ALTER TABLE math_problems_original_new RENAME TO math_problems_original"
+                ))
+
+                # Recreate indexes
+                db.session.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_math_problems_original_image_hash "
+                    "ON math_problems_original (image_hash)"
+                ))
+                db.session.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_math_problems_original_latex_string "
+                    "ON math_problems_original (latex_string)"
+                ))
+
+                db.session.commit()
+                print("  Successfully updated unique constraint to (image_url, feature)")
+            except Exception as e:
+                db.session.rollback()
+                print(f"  Warning: Could not migrate unique constraint: {e}")
+        else:
+            # PostgreSQL / other databases
+            try:
+                for constraint_name in ['uq_original_hash_feature',
+                                        'math_problems_original_image_hash_key']:
+                    try:
+                        db.session.execute(text(
+                            f"ALTER TABLE math_problems_original "
+                            f"DROP CONSTRAINT IF EXISTS {constraint_name}"
+                        ))
+                    except Exception:
+                        db.session.rollback()
+
+                db.session.execute(text(
+                    "ALTER TABLE math_problems_original "
+                    "ADD CONSTRAINT uq_original_url_feature UNIQUE (image_url, feature)"
+                ))
+
+                db.session.commit()
+                print("  Successfully updated unique constraint to (image_url, feature)")
+            except Exception as e:
+                db.session.rollback()
+                print(f"  Warning: Could not migrate unique constraint: {e}")
 
 
 app = create_app()
@@ -872,13 +972,13 @@ def register_problem_original():
     image_hash = compute_image_hash(image_data)
     feature_str = str(feature) if feature is not None else None
 
-    # Check if problem with same image + feature already exists
+    # Check if problem with same image_url + feature already exists
     existing = MathProblemOriginal.query.filter_by(
-        image_hash=image_hash, feature=feature_str
+        image_url=image_url, feature=feature_str
     ).first()
     if existing:
         return jsonify({
-            'error': 'An original problem with this exact image and feature already exists',
+            'error': 'An original problem with this image URL and feature already exists',
             'existing_uuid': existing.id
         }), 409
 
