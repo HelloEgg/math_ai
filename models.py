@@ -108,7 +108,7 @@ class MathProblemOriginal(db.Model):
 
     __tablename__ = 'math_problems_original'
     __table_args__ = (
-        db.UniqueConstraint('image_hash', 'feature', name='uq_original_hash_feature'),
+        db.UniqueConstraint('image_url', 'feature', name='uq_original_url_feature'),
     )
 
     id = db.Column(db.String(36), primary_key=True, default=generate_uuid)
