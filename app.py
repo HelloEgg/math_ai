@@ -870,10 +870,11 @@ def register_problem_original():
         return jsonify({'error': 'Failed to download image from URL'}), 400
 
     image_hash = compute_image_hash(image_data)
+    feature_str = str(feature) if feature is not None else None
 
     # Check if problem with same image + feature already exists
     existing = MathProblemOriginal.query.filter_by(
-        image_hash=image_hash, feature=feature
+        image_hash=image_hash, feature=feature_str
     ).first()
     if existing:
         return jsonify({
@@ -903,7 +904,7 @@ def register_problem_original():
         image_path=image_path,
         solution_latex=str(solution_latex),
         answer=str(answer) if answer is not None else None,
-        feature=str(feature) if feature is not None else None,
+        feature=feature_str,
         latex_string=latex_string
     )
     db.session.add(problem)
