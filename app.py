@@ -439,6 +439,13 @@ def find_similar_text_problem(text_string, model_class, similarity_threshold=0.8
     if not text_string:
         return None
 
+    # Normalize query string ONCE (not per-comparison)
+    normalized_query = normalize_text(text_string)
+    if not normalized_query:
+        return None
+
+    query_len = len(normalized_query)
+
     # Get all problems with latex_string (which stores text for non-math subjects)
     problems = model_class.query.filter(model_class.latex_string.isnot(None)).all()
 
@@ -446,10 +453,33 @@ def find_similar_text_problem(text_string, model_class, similarity_threshold=0.8
     best_similarity = 0.0
 
     for problem in problems:
-        similarity = calculate_text_similarity(text_string, problem.latex_string)
+        normalized_problem = normalize_text(problem.latex_string)
+        if not normalized_problem:
+            continue
+
+        problem_len = len(normalized_problem)
+
+        # Length-based pre-filtering:
+        # SequenceMatcher.ratio() = 2*M / T, so max ratio when lengths differ is
+        # 2 * min(len1, len2) / (len1 + len2). Skip if this upper bound < threshold.
+        max_possible_ratio = 2.0 * min(query_len, problem_len) / (query_len + problem_len)
+        if max_possible_ratio < similarity_threshold:
+            continue
+
+        # quick_ratio() gives an upper-bound in O(n) time, much faster than full ratio()
+        sm = SequenceMatcher(None, normalized_query, normalized_problem)
+        if sm.quick_ratio() < similarity_threshold:
+            continue
+
+        # Full ratio calculation (only for candidates that passed pre-filters)
+        similarity = sm.ratio()
         if similarity > best_similarity and similarity >= similarity_threshold:
             best_similarity = similarity
             best_match = problem
+
+            # Early termination for near-perfect matches
+            if best_similarity >= 0.98:
+                break
 
     if best_match:
         print(f"Found similar text problem with {best_similarity:.2%} similarity: {best_match.id}")
@@ -527,6 +557,13 @@ def find_similar_problem(latex_string, model_class, similarity_threshold=0.85, f
     if not latex_string:
         return None
 
+    # Normalize query string ONCE (not per-comparison)
+    normalized_query = normalize_latex(latex_string)
+    if not normalized_query:
+        return None
+
+    query_len = len(normalized_query)
+
     # Get all problems with latex_string, optionally filtered by feature
     query = model_class.query.filter(model_class.latex_string.isnot(None))
     if feature is not None and hasattr(model_class, 'feature'):
@@ -537,10 +574,33 @@ def find_similar_problem(latex_string, model_class, similarity_threshold=0.85, f
     best_similarity = 0.0
 
     for problem in problems:
-        similarity = calculate_latex_similarity(latex_string, problem.latex_string)
+        normalized_problem = normalize_latex(problem.latex_string)
+        if not normalized_problem:
+            continue
+
+        problem_len = len(normalized_problem)
+
+        # Length-based pre-filtering:
+        # SequenceMatcher.ratio() = 2*M / T, so max ratio when lengths differ is
+        # 2 * min(len1, len2) / (len1 + len2). Skip if this upper bound < threshold.
+        max_possible_ratio = 2.0 * min(query_len, problem_len) / (query_len + problem_len)
+        if max_possible_ratio < similarity_threshold:
+            continue
+
+        # quick_ratio() gives an upper-bound in O(n) time, much faster than full ratio()
+        sm = SequenceMatcher(None, normalized_query, normalized_problem)
+        if sm.quick_ratio() < similarity_threshold:
+            continue
+
+        # Full ratio calculation (only for candidates that passed pre-filters)
+        similarity = sm.ratio()
         if similarity > best_similarity and similarity >= similarity_threshold:
             best_similarity = similarity
             best_match = problem
+
+            # Early termination for near-perfect matches
+            if best_similarity >= 0.98:
+                break
 
     if best_match:
         print(f"Found similar problem with {best_similarity:.2%} similarity: {best_match.id}")
