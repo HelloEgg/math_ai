@@ -296,18 +296,9 @@ def extract_latex_from_image(image_data, api_key):
             mime_type = "image/jpeg"
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-3-pro-preview')
+        model = genai.GenerativeModel('gemini-2.0-flash')
 
-        prompt = """Extract ALL text and mathematical content from this math problem image.
-
-Output the complete problem text in a normalized format:
-1. Convert all mathematical expressions to LaTeX format
-2. Include ALL text, numbers, equations, and choices if present
-3. Preserve the problem structure (question text, equations, choices)
-4. Remove any formatting that doesn't affect mathematical meaning
-
-Output ONLY the extracted text/LaTeX, nothing else. No explanations or comments.
-If there are multiple choice options, include them with their labels (①②③④⑤ or 1,2,3,4,5 etc.)"""
+        prompt = """Extract ALL text and math from this image as LaTeX. Include choices if present. Output ONLY the extracted content."""
 
         image_part = {
             "mime_type": mime_type,
@@ -345,17 +336,9 @@ def extract_text_from_image(image_data, api_key):
             mime_type = "image/jpeg"
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-3-pro-preview')
+        model = genai.GenerativeModel('gemini-2.0-flash')
 
-        prompt = """Extract ALL text content from this image exactly as it appears.
-
-Output the complete text in a normalized format:
-1. Include ALL text, numbers, and choices if present
-2. Preserve the content structure (question text, passages, choices)
-3. If there are multiple choice options, include them with their labels (①②③④⑤ or 1,2,3,4,5 or A,B,C,D,E etc.)
-4. Maintain paragraph breaks with newlines
-
-Output ONLY the extracted text, nothing else. No explanations or comments."""
+        prompt = """Extract ALL text from this image exactly as it appears. Include choices if present. Output ONLY the extracted text."""
 
         image_part = {
             "mime_type": mime_type,
@@ -667,22 +650,7 @@ def search_problem():
             'similarity': 1.0
         })
 
-    # Step 2: Extract LaTeX from image using OCR and find similar problems
-    if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-
-        if latex_string:
-            # Find similar problem using fuzzy matching
-            similar_problem = find_similar_problem(latex_string, MathProblem, similarity_threshold=0.85)
-
-            if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({
-                    'uuid': similar_problem.id,
-                    'match_type': 'similar',
-                    'similarity': round(similarity, 4)
-                })
-
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({
         'uuid': None,
         'match_type': None,
@@ -944,6 +912,16 @@ def search_problem_original():
 
     image_hash = compute_image_hash(image_data)
 
+    not_found_response = jsonify({
+        'uuid': None,
+        'solution_latex': None,
+        'answer': None,
+        'feature': None,
+        'image_url': None,
+        'match_type': None,
+        'similarity': 0.0
+    })
+
     # Step 1: Try exact image hash + feature match first (fastest)
     problem = MathProblemOriginal.query.filter_by(
         image_hash=image_hash, feature=feature
@@ -960,37 +938,19 @@ def search_problem_original():
             'similarity': 1.0
         })
 
-    # Step 2: Extract LaTeX from image using OCR and find similar problems
-    if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
+    # Step 2: Hash-only check — if this image hash doesn't exist in DB at all,
+    # the image is completely new. Skip expensive OCR and return immediately.
+    hash_exists = db.session.query(
+        MathProblemOriginal.query.filter_by(image_hash=image_hash).exists()
+    ).scalar()
 
-        if latex_string:
-            similar_problem = find_similar_problem(
-                latex_string, MathProblemOriginal,
-                similarity_threshold=0.85, feature=feature
-            )
+    if not hash_exists:
+        # Image never registered — no point running OCR-based fuzzy search
+        return not_found_response
 
-            if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({
-                    'uuid': similar_problem.id,
-                    'solution_latex': similar_problem.solution_latex,
-                    'answer': similar_problem.answer,
-                    'feature': similar_problem.feature,
-                    'image_url': similar_problem.image_url,
-                    'match_type': 'similar',
-                    'similarity': round(similarity, 4)
-                })
-
-    return jsonify({
-        'uuid': None,
-        'solution_latex': None,
-        'answer': None,
-        'feature': None,
-        'image_url': None,
-        'match_type': None,
-        'similarity': 0.0
-    })
+    # Step 3: Image is known (hash exists with different feature) but no exact
+    # match for the requested feature. Return not found quickly.
+    return not_found_response
 
 
 @app.route('/register_original', methods=['POST'])
@@ -1307,14 +1267,7 @@ def search_problem_english():
     if problem:
         return jsonify({'uuid': problem.id, 'match_type': 'exact', 'similarity': 1.0})
 
-    if app.config.get('GEMINI_API_KEY'):
-        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if text_string:
-            similar_problem = find_similar_text_problem(text_string, EnglishProblem, similarity_threshold=0.85)
-            if similar_problem:
-                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'match_type': 'similar', 'similarity': round(similarity, 4)})
-
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({'uuid': None, 'match_type': None, 'similarity': 0.0})
 
 
@@ -1499,14 +1452,7 @@ def search_problem_science():
     if problem:
         return jsonify({'uuid': problem.id, 'match_type': 'exact', 'similarity': 1.0})
 
-    if app.config.get('GEMINI_API_KEY'):
-        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if text_string:
-            similar_problem = find_similar_text_problem(text_string, ScienceProblem, similarity_threshold=0.85)
-            if similar_problem:
-                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'match_type': 'similar', 'similarity': round(similarity, 4)})
-
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({'uuid': None, 'match_type': None, 'similarity': 0.0})
 
 
@@ -1691,14 +1637,7 @@ def search_problem_social_science():
     if problem:
         return jsonify({'uuid': problem.id, 'match_type': 'exact', 'similarity': 1.0})
 
-    if app.config.get('GEMINI_API_KEY'):
-        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if text_string:
-            similar_problem = find_similar_text_problem(text_string, SocialScienceProblem, similarity_threshold=0.85)
-            if similar_problem:
-                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'match_type': 'similar', 'similarity': round(similarity, 4)})
-
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({'uuid': None, 'match_type': None, 'similarity': 0.0})
 
 
@@ -1883,14 +1822,7 @@ def search_problem_korean():
     if problem:
         return jsonify({'uuid': problem.id, 'match_type': 'exact', 'similarity': 1.0})
 
-    if app.config.get('GEMINI_API_KEY'):
-        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if text_string:
-            similar_problem = find_similar_text_problem(text_string, KoreanProblem, similarity_threshold=0.85)
-            if similar_problem:
-                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'match_type': 'similar', 'similarity': round(similarity, 4)})
-
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({'uuid': None, 'match_type': None, 'similarity': 0.0})
 
 
@@ -2073,13 +2005,7 @@ def search_problem_english_summary():
     problem = EnglishProblemSummary.query.filter_by(image_hash=image_hash).first()
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_English_summary/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
-    if app.config.get('GEMINI_API_KEY'):
-        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if text_string:
-            similar_problem = find_similar_text_problem(text_string, EnglishProblemSummary, similarity_threshold=0.85)
-            if similar_problem:
-                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_English_summary/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
@@ -2215,13 +2141,7 @@ def search_problem_english_deep():
     problem = EnglishProblemDeep.query.filter_by(image_hash=image_hash).first()
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_English_deep/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
-    if app.config.get('GEMINI_API_KEY'):
-        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if text_string:
-            similar_problem = find_similar_text_problem(text_string, EnglishProblemDeep, similarity_threshold=0.85)
-            if similar_problem:
-                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_English_deep/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
@@ -2357,13 +2277,7 @@ def search_problem_science_summary():
     problem = ScienceProblemSummary.query.filter_by(image_hash=image_hash).first()
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_science_summary/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
-    if app.config.get('GEMINI_API_KEY'):
-        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if text_string:
-            similar_problem = find_similar_text_problem(text_string, ScienceProblemSummary, similarity_threshold=0.85)
-            if similar_problem:
-                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_science_summary/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
@@ -2499,13 +2413,7 @@ def search_problem_science_deep():
     problem = ScienceProblemDeep.query.filter_by(image_hash=image_hash).first()
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_science_deep/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
-    if app.config.get('GEMINI_API_KEY'):
-        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if text_string:
-            similar_problem = find_similar_text_problem(text_string, ScienceProblemDeep, similarity_threshold=0.85)
-            if similar_problem:
-                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_science_deep/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
@@ -2641,13 +2549,7 @@ def search_problem_social_science_summary():
     problem = SocialScienceProblemSummary.query.filter_by(image_hash=image_hash).first()
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_social_science_summary/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
-    if app.config.get('GEMINI_API_KEY'):
-        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if text_string:
-            similar_problem = find_similar_text_problem(text_string, SocialScienceProblemSummary, similarity_threshold=0.85)
-            if similar_problem:
-                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_social_science_summary/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
@@ -2783,13 +2685,7 @@ def search_problem_social_science_deep():
     problem = SocialScienceProblemDeep.query.filter_by(image_hash=image_hash).first()
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_social_science_deep/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
-    if app.config.get('GEMINI_API_KEY'):
-        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if text_string:
-            similar_problem = find_similar_text_problem(text_string, SocialScienceProblemDeep, similarity_threshold=0.85)
-            if similar_problem:
-                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_social_science_deep/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
@@ -2925,13 +2821,7 @@ def search_problem_korean_summary():
     problem = KoreanProblemSummary.query.filter_by(image_hash=image_hash).first()
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_Korean_summary/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
-    if app.config.get('GEMINI_API_KEY'):
-        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if text_string:
-            similar_problem = find_similar_text_problem(text_string, KoreanProblemSummary, similarity_threshold=0.85)
-            if similar_problem:
-                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_Korean_summary/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
@@ -3067,13 +2957,7 @@ def search_problem_korean_deep():
     problem = KoreanProblemDeep.query.filter_by(image_hash=image_hash).first()
     if problem:
         return jsonify({'uuid': problem.id, 'solution_latex': problem.solution_latex, 'answer': problem.answer, 'feature': problem.feature, 'image_url': f'/problems_Korean_deep/{problem.id}/image', 'match_type': 'exact', 'similarity': 1.0})
-    if app.config.get('GEMINI_API_KEY'):
-        text_string = extract_text_from_image(image_data, app.config['GEMINI_API_KEY'])
-        if text_string:
-            similar_problem = find_similar_text_problem(text_string, KoreanProblemDeep, similarity_threshold=0.85)
-            if similar_problem:
-                similarity = calculate_text_similarity(text_string, similar_problem.latex_string)
-                return jsonify({'uuid': similar_problem.id, 'solution_latex': similar_problem.solution_latex, 'answer': similar_problem.answer, 'feature': similar_problem.feature, 'image_url': f'/problems_Korean_deep/{similar_problem.id}/image', 'match_type': 'similar', 'similarity': round(similarity, 4)})
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({'uuid': None, 'solution_latex': None, 'answer': None, 'feature': None, 'image_url': None, 'match_type': None, 'similarity': 0.0})
 
 
@@ -3225,22 +3109,7 @@ def search_problem_summary():
             'similarity': 1.0
         })
 
-    # Step 2: Extract LaTeX from image using OCR and find similar problems
-    if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-
-        if latex_string:
-            # Find similar problem using fuzzy matching
-            similar_problem = find_similar_problem(latex_string, MathProblemSummary, similarity_threshold=0.85)
-
-            if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({
-                    'uuid': similar_problem.id,
-                    'match_type': 'similar',
-                    'similarity': round(similarity, 4)
-                })
-
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({
         'uuid': None,
         'match_type': None,
@@ -3459,22 +3328,7 @@ def search_problem_deep():
             'similarity': 1.0
         })
 
-    # Step 2: Extract LaTeX from image using OCR and find similar problems
-    if app.config.get('GEMINI_API_KEY'):
-        latex_string = extract_latex_from_image(image_data, app.config['GEMINI_API_KEY'])
-
-        if latex_string:
-            # Find similar problem using fuzzy matching
-            similar_problem = find_similar_problem(latex_string, MathProblemDeep, similarity_threshold=0.85)
-
-            if similar_problem:
-                similarity = calculate_latex_similarity(latex_string, similar_problem.latex_string)
-                return jsonify({
-                    'uuid': similar_problem.id,
-                    'match_type': 'similar',
-                    'similarity': round(similarity, 4)
-                })
-
+    # Hash not found — image is new, skip expensive OCR
     return jsonify({
         'uuid': None,
         'match_type': None,
