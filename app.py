@@ -4918,11 +4918,24 @@ JSON 배열로만 응답하세요:
 
                 # --- Solve ---
                 print(f"  Q{q_num}: Solving...")
+
+                # Build MCQ-aware solve prompt
+                mcq_instruction = ""
+                if is_mcq and choices:
+                    choices_text_for_solve = '\n'.join(choices)
+                    mcq_instruction = f"""
+★ 이 문제는 객관식입니다. 선택지:
+{choices_text_for_solve}
+
+★ 정답은 반드시 선택지 번호(1, 2, 3, 4, 5 중 하나)로 답하세요.
+  예: 정답이 ①이면 "answer": 1, 정답이 ③이면 "answer": 3
+"""
+
                 solve_prompt = f"""다음 문제를 풀어주세요.
 
 문제:
 {q_text}
-
+{mcq_instruction}
 풀이 규칙:
 - 단계별로 깔끔하게 풀이하세요
 - 검산 과정은 포함하지 마세요
@@ -4930,12 +4943,13 @@ JSON 배열로만 응답하세요:
 
 ★ LaTeX 수식 표기 규칙:
 - 풀이(solution)와 정답(answer) 안에 LaTeX 수식이 있으면 반드시 $ 기호로 감싸세요
-- 예: "answer": "$\\frac{1}{4}$", "answer": "$y = \\frac{1}{4}x^2$"
+- 예: "answer": "$\\frac{{1}}{{4}}$", "answer": "$y = \\frac{{1}}{{4}}x^2$"
 - 단순 숫자(예: 3, -5, 42)는 $ 없이 그대로 쓰세요
 - 분수, 제곱, 루트 등 수식이 포함되면 반드시 $로 감싸세요
+- 객관식이면 answer는 숫자(1~5)로만 쓰세요
 
 JSON으로만 응답하세요:
-{{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답"}}"""
+{{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답"}}""""""
 
                 solve_parts = [solve_prompt]
                 # Include diagram images in solve request for visual context
@@ -4957,7 +4971,16 @@ JSON으로만 응답하세요:
                     try:
                         answer_number = int(answer)
                     except (ValueError, TypeError):
-                        answer_number = answer
+                        # Answer is text (e.g. "ㄱ"), find matching choice number
+                        answer_str = str(answer).strip()
+                        for idx, choice in enumerate(choices, 1):
+                            if answer_str in choice:
+                                answer_number = idx
+                                print(f"  Q{q_num}: Mapped text answer '{answer_str}' → choice {idx}")
+                                break
+                        else:
+                            # Fallback: keep as-is if no match found
+                            answer_number = answer
 
                 # --- Build answer image: question + divider + solution ---
                 answer_image_url = None
