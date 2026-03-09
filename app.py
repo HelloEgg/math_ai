@@ -4801,7 +4801,9 @@ def pdf_extract():
 이 PDF는 총 {len(page_images)}페이지입니다.
 
 각 문제에 대해 3가지를 추출하세요:
-1. question_text: 문제 텍스트 (LaTeX 수식 포함, 한국어). 선택지는 여기에 포함하지 마세요.
+1. question_text: 문제 텍스트 (한국어). 선택지는 여기에 포함하지 마세요.
+   - LaTeX 수식은 반드시 $ 기호로 감싸세요. 예: $\\frac{1}{4}$, $x^2 + 2x + 1 = 0$
+   - 단순 숫자(3, -5)는 $ 없이 그대로
 2. diagrams: 문제에 포함된 그림/도형/그래프/표의 전체 영역 (bounding box).
 3. choices: 객관식 선택지 (있는 경우만)
 
@@ -4926,6 +4928,12 @@ JSON 배열로만 응답하세요:
 - 검산 과정은 포함하지 마세요
 - 한국어로 작성하세요
 
+★ LaTeX 수식 표기 규칙:
+- 풀이(solution)와 정답(answer) 안에 LaTeX 수식이 있으면 반드시 $ 기호로 감싸세요
+- 예: "answer": "$\\frac{1}{4}$", "answer": "$y = \\frac{1}{4}x^2$"
+- 단순 숫자(예: 3, -5, 42)는 $ 없이 그대로 쓰세요
+- 분수, 제곱, 루트 등 수식이 포함되면 반드시 $로 감싸세요
+
 JSON으로만 응답하세요:
 {{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답"}}"""
 
@@ -4988,7 +4996,8 @@ JSON으로만 응답하세요:
                     "answerString": solution_text,
                     "questionImageUrl": question_image_url,
                     "answerImageUrl": answer_image_url,
-                    "answer": answer_number
+                    "answer": answer_number,
+                    "is_mcq": is_mcq
                 })
 
             except Exception as e:
@@ -4998,7 +5007,8 @@ JSON으로만 응답하세요:
                     "answerString": f"풀이 실패: {str(e)}",
                     "questionImageUrl": None,
                     "answerImageUrl": None,
-                    "answer": None
+                    "answer": None,
+                    "is_mcq": is_mcq
                 })
 
         print(f"PDF Extract: Completed {len(results)} questions")
