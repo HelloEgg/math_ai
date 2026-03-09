@@ -4949,7 +4949,7 @@ JSON 배열로만 응답하세요:
 - 객관식이면 answer는 숫자(1~5)로만 쓰세요
 
 JSON으로만 응답하세요:
-{{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답"}}""""""
+{{"solution": "단계별 풀이 (LaTeX, 한국어)", "answer": "최종 정답"}}"""
 
                 solve_parts = [solve_prompt]
                 # Include diagram images in solve request for visual context
