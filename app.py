@@ -4043,6 +4043,10 @@ def generate_math_twin():
         is_mcq = step2.get('is_mcq', False)
         choices = step2.get('choices', [])
         answer_number = step2.get('answer_number', 0)
+        if not is_mcq and answer:
+            answer_str = str(answer).strip()
+            if not answer_str.startswith('$'):
+                answer = f"${answer_str}$"
         print(f"  Answer: {answer}, is_mcq={is_mcq}")
 
         # === Save generated image ===
@@ -4140,6 +4144,10 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
         is_mcq = step2.get('is_mcq', False)
         choices = step2.get('choices', [])
         answer_number = step2.get('answer_number', 0)
+        if not is_mcq and answer:
+            answer_str = str(answer).strip()
+            if not answer_str.startswith('$'):
+                answer = f"${answer_str}$"
         print(f"  {tag} Answer: {answer}, is_mcq={is_mcq}")
 
         # === Save generated image ===
@@ -4964,6 +4972,10 @@ JSON으로만 응답하세요:
                 solve_result = gemini_generate_json(model, solve_parts, context=f"pdf_extract solve Q{q_num}")
                 solution_text = solve_result.get('solution', '')
                 answer = solve_result.get('answer', '')
+                if not is_mcq and answer:
+                    answer_str = str(answer).strip()
+                    if not answer_str.startswith('$'):
+                        answer = f"${answer_str}$"
                 print(f"  Q{q_num}: Answer = {answer}")
 
                 answer_number = answer
