@@ -4441,19 +4441,21 @@ body {{
     padding: {padding}px;
     background: white;
     color: #222;
-    max-width: {max_width - padding * 2}px;
+    width: {max_width - padding * 2}px;
     word-wrap: break-word;
     overflow-wrap: break-word;
+    overflow: visible;
 }}
 p {{
     margin: 0 0 0.4em 0;
+    overflow-wrap: break-word;
+    word-break: keep-all;
 }}
 .spacer {{
     height: 0.5em;
 }}
 .katex {{
     font-size: 1.1em;
-    white-space: normal !important;
 }}
 .katex-display {{
     margin: 0.5em 0;
@@ -4476,26 +4478,36 @@ renderMathInElement(document.body, {{
 </body>
 </html>'''
 
-        page = browser.new_page(viewport={'width': max_width, 'height': 600})
+        # Use wide initial viewport so content can overflow visibly
+        initial_vw = max(max_width, 2400)
+        page = browser.new_page(viewport={'width': initial_vw, 'height': 800})
         try:
             page.set_content(html, wait_until='domcontentloaded')
             page.wait_for_timeout(500)
 
-            # Get actual content size; if content overflows, widen viewport
-            body_box = page.evaluate('''() => {
-                const body = document.body;
-                const scrollW = document.documentElement.scrollWidth;
-                const scrollH = document.documentElement.scrollHeight;
-                const rect = body.getBoundingClientRect();
+            # Measure actual rendered content bounds (including any KaTeX overflow)
+            content_bounds = page.evaluate('''() => {
+                const all = document.body.querySelectorAll('*');
+                let maxRight = 0;
+                let maxBottom = 0;
+                for (const el of all) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.right > maxRight) maxRight = rect.right;
+                    if (rect.bottom > maxBottom) maxBottom = rect.bottom;
+                }
+                const bodyRect = document.body.getBoundingClientRect();
                 return {
-                    width: Math.max(Math.ceil(rect.width), scrollW),
-                    height: Math.max(Math.ceil(rect.height), scrollH)
+                    width: Math.ceil(Math.max(maxRight, bodyRect.right)),
+                    height: Math.ceil(Math.max(maxBottom, bodyRect.bottom))
                 };
             }''')
 
-            actual_width = max(max_width, body_box['width'])
-            content_height = body_box['height'] + padding * 2
-            page.set_viewport_size({'width': actual_width, 'height': max(200, content_height)})
+            actual_width = content_bounds['width'] + padding
+            content_height = content_bounds['height'] + padding
+            page.set_viewport_size({
+                'width': max(max_width, actual_width),
+                'height': max(200, content_height)
+            })
 
             screenshot_bytes = page.screenshot(full_page=True)
         finally:
