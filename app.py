@@ -4478,17 +4478,18 @@ renderMathInElement(document.body, {{
         page = browser.new_page(viewport={'width': max_width, 'height': 600})
         try:
             page.set_content(html, wait_until='domcontentloaded')
-            page.wait_for_timeout(300)
+            page.wait_for_timeout(500)
 
             # Get actual content height and take a tight screenshot
             body_box = page.evaluate('''() => {
                 const body = document.body;
+                const scrollH = document.documentElement.scrollHeight;
                 const rect = body.getBoundingClientRect();
-                return {width: Math.ceil(rect.width), height: Math.ceil(rect.height)};
+                return {width: Math.ceil(rect.width), height: Math.max(Math.ceil(rect.height), scrollH)};
             }''')
 
-            content_height = body_box['height'] + padding
-            page.set_viewport_size({'width': max_width, 'height': max(100, content_height)})
+            content_height = body_box['height'] + padding * 2
+            page.set_viewport_size({'width': max_width, 'height': max(200, content_height)})
 
             screenshot_bytes = page.screenshot(full_page=True)
         finally:
@@ -4870,7 +4871,7 @@ JSON 배열로만 응답하세요:
 
             try:
                 # --- Part 1: Render question text ---
-                text_img = render_text_to_image(q_text, font_size=30)
+                text_img = render_text_to_image(q_text, font_size=30, max_width=1600)
 
                 # --- Part 2: Crop diagram(s) from PDF page images ---
                 diagram_imgs = []
