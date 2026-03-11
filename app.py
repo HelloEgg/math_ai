@@ -4441,7 +4441,7 @@ body {{
     padding: {padding}px;
     background: white;
     color: #222;
-    max-width: {max_width}px;
+    max-width: {max_width - padding * 2}px;
     word-wrap: break-word;
     overflow-wrap: break-word;
 }}
@@ -4453,6 +4453,7 @@ p {{
 }}
 .katex {{
     font-size: 1.1em;
+    white-space: normal !important;
 }}
 .katex-display {{
     margin: 0.5em 0;
@@ -4480,16 +4481,21 @@ renderMathInElement(document.body, {{
             page.set_content(html, wait_until='domcontentloaded')
             page.wait_for_timeout(500)
 
-            # Get actual content height and take a tight screenshot
+            # Get actual content size; if content overflows, widen viewport
             body_box = page.evaluate('''() => {
                 const body = document.body;
+                const scrollW = document.documentElement.scrollWidth;
                 const scrollH = document.documentElement.scrollHeight;
                 const rect = body.getBoundingClientRect();
-                return {width: Math.ceil(rect.width), height: Math.max(Math.ceil(rect.height), scrollH)};
+                return {
+                    width: Math.max(Math.ceil(rect.width), scrollW),
+                    height: Math.max(Math.ceil(rect.height), scrollH)
+                };
             }''')
 
+            actual_width = max(max_width, body_box['width'])
             content_height = body_box['height'] + padding * 2
-            page.set_viewport_size({'width': max_width, 'height': max(200, content_height)})
+            page.set_viewport_size({'width': actual_width, 'height': max(200, content_height)})
 
             screenshot_bytes = page.screenshot(full_page=True)
         finally:
@@ -4497,14 +4503,14 @@ renderMathInElement(document.body, {{
 
         img = Image.open(io.BytesIO(screenshot_bytes)).convert('RGB')
 
-        # Crop to content (remove excess whitespace at bottom)
+        # Crop to content (remove excess whitespace at bottom and right)
         img_array = img.load()
         w, h = img.size
         # Find last non-white row
         bottom = h - 1
         for y_pos in range(h - 1, 0, -1):
             row_has_content = False
-            for x_pos in range(0, w, 4):  # sample every 4th pixel for speed
+            for x_pos in range(0, w, 4):
                 r, g, b = img_array[x_pos, y_pos]
                 if r < 250 or g < 250 or b < 250:
                     row_has_content = True
@@ -4512,8 +4518,20 @@ renderMathInElement(document.body, {{
             if row_has_content:
                 bottom = min(y_pos + padding, h)
                 break
-        if bottom < h - 10:
-            img = img.crop((0, 0, w, bottom))
+        # Find last non-white column
+        right = w - 1
+        for x_pos in range(w - 1, 0, -1):
+            col_has_content = False
+            for y_pos in range(0, bottom, 4):
+                r, g, b = img_array[x_pos, y_pos]
+                if r < 250 or g < 250 or b < 250:
+                    col_has_content = True
+                    break
+            if col_has_content:
+                right = min(x_pos + padding, w)
+                break
+        if bottom < h - 10 or right < w - 10:
+            img = img.crop((0, 0, right, bottom))
 
         return img
 
