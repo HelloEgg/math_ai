@@ -4065,7 +4065,7 @@ def generate_math_twin():
             'answer': answer,
             'answer_number': answer_number,
             'solution': solution_text,
-            'is_mcq': is_mcq,
+            'isMcq': is_mcq,
             'choices': choices,
             'modified_image_id': generated_image_uuid,
             'modified_image_url': f"/math_twin/images/{generated_image_uuid}" if generated_image_uuid else None,
@@ -4168,7 +4168,7 @@ def generate_single_twin(api_key, image_data, original_url, base_url, variation_
             "originalImageURL": original_url,
             "questionImageUrl": generated_image_url,
             "answerImageUrl": generated_image_url,
-            "isMCQ": is_mcq,
+            "isMcq": is_mcq,
             "choices": choices,
             "answer": answer_number
         }
@@ -4821,7 +4821,9 @@ def pdf_extract():
   - 그림이 여러 개면 각각의 bounding box를 별도로
   - 그림이 없으면 빈 배열 []
   - 중요: 그림 안에 포함된 텍스트, 레이블, 말풍선, 축 이름, 숫자 등도 모두 포함해서 crop하세요
-  - 그림의 전체 영역을 넉넉하게 잡아주세요. 잘리는 것보다 여유있게 잡는 게 좋습니다
+  - ★★★ 매우 중요: bounding box를 실제 그림 영역보다 상하좌우 5~10% 더 넉넉하게 잡아주세요
+  - 그림이 잘리는 것보다 여백이 좀 있는 게 훨씬 좋습니다
+  - 특히 그래프의 축 라벨, 숫자, 화살표 끝부분이 잘리지 않도록 충분한 여유를 두세요
 
 JSON 배열로만 응답하세요:
 [
@@ -4879,10 +4881,13 @@ JSON 배열로만 응답하세요:
                         src_img = page_images[page_idx]
                         w, h = src_img.size
 
-                        x1 = max(0, int(w * d.get('x_min', 0)))
-                        y1 = max(0, int(h * d.get('y_min', 0)))
-                        x2 = min(w, int(w * d.get('x_max', 1)))
-                        y2 = min(h, int(h * d.get('y_max', 1)))
+                        # Add 3% padding to avoid cutting off edges
+                        pad_x = int(w * 0.03)
+                        pad_y = int(h * 0.03)
+                        x1 = max(0, int(w * d.get('x_min', 0)) - pad_x)
+                        y1 = max(0, int(h * d.get('y_min', 0)) - pad_y)
+                        x2 = min(w, int(w * d.get('x_max', 1)) + pad_x)
+                        y2 = min(h, int(h * d.get('y_max', 1)) + pad_y)
 
                         if x2 > x1 and y2 > y1:
                             cropped = src_img.crop((x1, y1, x2, y2))
@@ -5032,7 +5037,7 @@ JSON으로만 응답하세요:
                     "questionImageUrl": question_image_url,
                     "answerImageUrl": answer_image_url,
                     "answer": answer_number,
-                    "is_mcq": is_mcq
+                    "isMcq": is_mcq
                 })
 
             except Exception as e:
@@ -5043,7 +5048,7 @@ JSON으로만 응답하세요:
                     "questionImageUrl": None,
                     "answerImageUrl": None,
                     "answer": None,
-                    "is_mcq": is_mcq
+                    "isMcq": is_mcq
                 })
 
         print(f"PDF Extract: Completed {len(results)} questions")
